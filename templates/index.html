@@ -3,46 +3,86 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Capacity Desk</title>
+  <title>Load Tester</title>
   <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
 </head>
 <body>
   <main class="shell">
-    <header>
-      <p class="kicker">Kapasite ölçüm konsolu</p>
-      <h1>Yanıtı ölç. Eşiği gör.</h1>
-      <p class="intro">Kademeli, zaman sınırlı kontroller için tarayıcı arayüzü. Başlangıç önerileri bu test makinesinin kaynaklarından gelir.</p>
+    <header class="topbar">
+      <div class="brand">
+        <span class="dot"></span>
+        <h1>Load Tester</h1>
+        <span class="sub">yuk / latency testi</span>
+      </div>
+      <div class="machine">
+        <div><span>OS</span><strong>{{ profile.os }}</strong></div>
+        <div><span>CPU</span><strong>{{ profile.cores }} cekirdek</strong></div>
+        <div><span>RAM</span><strong>{% if profile.memory_gib %}{{ profile.memory_gib }} GiB{% else %}-{% endif %}</strong></div>
+        <button id="apply-suggestion" type="button" class="ghost">Oneriyi uygula</button>
+      </div>
     </header>
 
-    <section class="machine" aria-label="Test makinesi özeti">
-      <div><span>İşletim sistemi</span><strong>{{ profile.os }}</strong></div>
-      <div><span>İşlemci</span><strong>{{ profile.cores }} mantıksal çekirdek</strong></div>
-      <div><span>Bellek</span><strong>{% if profile.memory_gib %}{{ profile.memory_gib }} GiB{% else %}ölçülemedi{% endif %}</strong></div>
-      <button id="apply-suggestion" type="button">Öneriyi uygula</button>
-    </section>
-
     <section class="workspace">
-      <form id="test-form" class="panel">
-        <div class="field full"><label for="url">Hedef URL</label><input id="url" name="url" value="{{ default_url }}" required></div>
-        <div class="field"><label for="method">Metod</label><select id="method" name="method"><option>GET</option><option>POST</option><option>PUT</option><option>PATCH</option><option>DELETE</option></select></div>
-        <div class="field"><label for="token">Bearer token</label><input id="token" name="token" type="password" autocomplete="off" placeholder="Sadece bu testte kullanılır"></div>
-        <div class="field"><label for="rps">RPS <small>en çok 100</small></label><input id="rps" name="rps" type="number" min="1" max="100" value="{{ profile.suggested.rps }}"></div>
-        <div class="field"><label for="threads">Worker <small>en çok 32</small></label><input id="threads" name="threads" type="number" min="1" max="32" value="{{ profile.suggested.threads }}"></div>
-        <div class="field"><label for="duration">Süre <small>saniye</small></label><input id="duration" name="duration" type="number" min="1" max="60" value="{{ profile.suggested.duration }}"></div>
-        <div class="field"><label for="timeout">Timeout <small>saniye</small></label><input id="timeout" name="timeout" type="number" min="1" max="30" value="{{ profile.suggested.timeout }}"></div>
-        <label class="field full" for="body">JSON body <small>POST, PUT ve PATCH için</small><textarea id="body" name="body" spellcheck="false" placeholder='{"key":"value"}'></textarea></label>
-        <label class="confirm"><input id="confirm" type="checkbox"> Bu endpoint için test yetkim var; test en çok 60 saniye ve 100 RPS ile sınırlı.</label>
-        <button class="run" type="submit">Kontrollü ölçümü başlat</button>
+      <form id="test-form" class="card config" autocomplete="off">
+        <div class="field full">
+          <label for="url">Hedef URL</label>
+          <input id="url" name="url" value="{{ default_url }}" required spellcheck="false">
+        </div>
+
+        <div class="field">
+          <label for="method">Method</label>
+          <select id="method" name="method">
+            <option>GET</option><option>POST</option><option>PUT</option>
+            <option>PATCH</option><option>DELETE</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="token">Bearer token <small>opsiyonel</small></label>
+          <input id="token" name="token" type="password" placeholder="sadece bu testte">
+        </div>
+
+        <div class="grid4">
+          <div class="field"><label for="rps">RPS <small>max 100</small></label><input id="rps" name="rps" type="number" min="1" max="100" value="{{ profile.suggested.rps }}"></div>
+          <div class="field"><label for="threads">Worker <small>max 32</small></label><input id="threads" name="threads" type="number" min="1" max="32" value="{{ profile.suggested.threads }}"></div>
+          <div class="field"><label for="duration">Sure <small>sn</small></label><input id="duration" name="duration" type="number" min="1" max="3600" value="{{ profile.suggested.duration }}"></div>
+          <div class="field"><label for="timeout">Timeout <small>sn</small></label><input id="timeout" name="timeout" type="number" min="1" max="30" value="{{ profile.suggested.timeout }}"></div>
+        </div>
+
+        <div class="field full">
+          <label for="body">JSON body <small>POST / PUT / PATCH</small></label>
+          <textarea id="body" name="body" spellcheck="false" placeholder='{"key":"value"}'></textarea>
+        </div>
+
+        <label class="confirm full">
+          <input id="confirm" type="checkbox">
+          <span>Bu endpoint icin test yetkim var.</span>
+        </label>
+
+        <button class="run full" type="submit">Testi baslat</button>
       </form>
 
-      <aside class="panel result" aria-live="polite">
-        <p class="kicker">Sonuç</p>
-        <h2 id="result-title">Henüz ölçüm yok</h2>
-        <p id="result-note">Ayarları girip kontrollü bir kademe başlat.</p>
-        <dl id="metrics"></dl>
+      <aside class="card result" aria-live="polite">
+        <div class="result-head">
+          <div>
+            <p class="kicker">Sonuc</p>
+            <h2 id="result-title">Henuz test yok</h2>
+            <p id="result-note" class="note">Ayarlari girip testi baslat.</p>
+          </div>
+          <span id="status-badge" class="badge idle">hazir</span>
+        </div>
+
+        <div id="progress-wrap" class="progress-wrap" hidden>
+          <div class="progress-track"><div id="progress-bar" class="progress-bar"></div></div>
+          <div class="progress-meta"><span id="progress-elapsed">0.0s</span><span id="progress-total"></span></div>
+        </div>
+
+        <div id="tiles" class="tiles"></div>
+        <div id="statuses" class="statuses"></div>
+        <p id="error-sample" class="error-sample" hidden></p>
       </aside>
     </section>
   </main>
+
   <script>window.SYSTEM_PROFILE = {{ profile|tojson }};</script>
   <script src="{{ url_for('static', filename='app.js') }}"></script>
 </body>

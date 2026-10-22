@@ -20,7 +20,7 @@ except ImportError:  # Docker installs psutil; retain a useful fallback.
 
 
 MAX_RPS = 100
-MAX_DURATION = 60
+MAX_DURATION = 3600
 MAX_THREADS = 32
 DEFAULT_URL = "https://api.7xwon.com/main-events"
 USER_AGENT = (
