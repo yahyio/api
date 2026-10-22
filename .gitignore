@@ -1,0 +1,8 @@
+# Build artifacts (PyInstaller)
+build/
+dist/
+*.pyc
+
+# Caches
+__pycache__/
+.ruff_cache/

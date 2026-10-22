@@ -1,0 +1,4 @@
+requests==2.32.4
+Flask==3.1.0
+waitress==3.0.2
+psutil==6.1.1
