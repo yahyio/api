@@ -2,16 +2,18 @@
 
 from __future__ import annotations
 
+import json
 import os
 import platform
 import statistics
 import threading
 import time
+from collections import Counter, deque
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.parse import urlparse
 
 import requests
-from flask import Flask, jsonify, render_template, request
+from flask import Flask, Response, jsonify, render_template, request
 
 try:
     import psutil
@@ -33,8 +35,63 @@ app.config["MAX_CONTENT_LENGTH"] = 16 * 1024
 
 # In-flight runs keyed by a client-supplied run id, so /api/stop can cancel a
 # test while /api/run is still blocking in another request thread.
-ACTIVE_RUNS: dict[str, threading.Event] = {}
+ACTIVE_RUNS: dict[str, "RunState"] = {}
 ACTIVE_RUNS_LOCK = threading.Lock()
+
+
+class RunState:
+    """Live, thread-safe counters for one in-flight run, read by /api/stream."""
+
+    def __init__(self, total):
+        self.lock = threading.Lock()
+        self.stop_event = threading.Event()
+        self.total = total
+        self.started = time.perf_counter()
+        self.done = 0
+        self.ok = 0
+        self.failed = 0
+        self.bytes = 0
+        self.statuses = Counter()
+        self.latencies = []
+        self.recent = deque(maxlen=120)  # last N latencies for the live chart
+        self.finished = False
+
+    def record(self, status, latency, size, error):
+        with self.lock:
+            self.done += 1
+            self.latencies.append(latency)
+            self.recent.append(round(latency, 1))
+            self.bytes += size
+            if error is None and status is not None and 200 <= status < 400:
+                self.ok += 1
+            else:
+                self.failed += 1
+            self.statuses[str(status) if status is not None else "ERR"] += 1
+
+    def snapshot(self):
+        with self.lock:
+            elapsed = max(time.perf_counter() - self.started, 1e-9)
+            lat = sorted(self.latencies)
+
+            def pct(percent):
+                return round(lat[round((len(lat) - 1) * percent / 100)], 1) if lat else 0
+
+            return {
+                "total": self.total,
+                "done": self.done,
+                "ok": self.ok,
+                "failed": self.failed,
+                "achieved_rps": round(self.done / elapsed, 2),
+                "avg_ms": round(statistics.mean(lat), 1) if lat else 0,
+                "p95_ms": pct(95),
+                "p99_ms": pct(99),
+                "total_mib": round(self.bytes / 1024**2, 3),
+                "statuses": dict(self.statuses),
+                "recent": list(self.recent),
+                "elapsed": round(elapsed, 1),
+                "finished": self.finished,
+                "stopped": self.stop_event.is_set(),
+            }
 
 
 def system_profile():
@@ -103,9 +160,8 @@ def one_request(session, url, method, headers, timeout, body):
         return None, (time.perf_counter() - started) * 1000, 0, str(exc)
 
 
-def run_check(url, method, rps, duration, threads, timeout, token, body, stop_event=None):
-    if stop_event is None:
-        stop_event = threading.Event()
+def run_check(url, method, rps, duration, threads, timeout, token, body, state):
+    stop_event = state.stop_event
     headers = {"Accept": "application/json", "User-Agent": USER_AGENT}
     if token:
         headers["Authorization"] = f"Bearer {token}"
@@ -120,6 +176,7 @@ def run_check(url, method, rps, duration, threads, timeout, token, body, stop_ev
     total = rps * duration
     started = time.perf_counter()
     futures = []
+    results = []
     with ThreadPoolExecutor(max_workers=threads) as pool:
         for index in range(total):
             if stop_event.is_set():
@@ -132,7 +189,10 @@ def run_check(url, method, rps, duration, threads, timeout, token, body, stop_ev
                 if stop_event.wait(pause):
                     break
             futures.append(pool.submit(work))
-        results = [future.result() for future in as_completed(futures)]
+        for future in as_completed(futures):
+            result = future.result()
+            results.append(result)
+            state.record(*result)  # feed live counters consumed by /api/stream
 
     elapsed = max(time.perf_counter() - started, 1e-9)
     stopped = stop_event.is_set()
@@ -192,16 +252,18 @@ def run():
         return jsonify({"error": "Test sahipliği onayı gerekli."}), 400
 
     run_id = str(data.get("run_id", "")).strip()
-    stop_event = threading.Event()
+    state = RunState(rps * duration)
     if run_id:
         with ACTIVE_RUNS_LOCK:
-            ACTIVE_RUNS[run_id] = stop_event
+            ACTIVE_RUNS[run_id] = state
     try:
         result = run_check(
             url, method, rps, duration, threads, timeout,
-            str(data.get("token", "")).strip(), body, stop_event,
+            str(data.get("token", "")).strip(), body, state,
         )
     finally:
+        with state.lock:
+            state.finished = True
         if run_id:
             with ACTIVE_RUNS_LOCK:
                 ACTIVE_RUNS.pop(run_id, None)
@@ -213,11 +275,41 @@ def stop():
     data = request.get_json(silent=True) or {}
     run_id = str(data.get("run_id", "")).strip()
     with ACTIVE_RUNS_LOCK:
-        event = ACTIVE_RUNS.get(run_id)
-    if event is None:
+        state = ACTIVE_RUNS.get(run_id)
+    if state is None:
         return jsonify({"stopped": False, "error": "Aktif test bulunamadı."}), 404
-    event.set()
+    state.stop_event.set()
     return jsonify({"stopped": True})
+
+
+@app.get("/api/stream")
+def stream():
+    run_id = request.args.get("run_id", "").strip()
+
+    def gen():
+        state = None
+        for _ in range(60):  # wait up to ~3s for the run to register
+            with ACTIVE_RUNS_LOCK:
+                state = ACTIVE_RUNS.get(run_id)
+            if state is not None:
+                break
+            time.sleep(0.05)
+        if state is None:
+            yield "event: end\ndata: {}\n\n"
+            return
+        while True:
+            snapshot = state.snapshot()
+            yield f"data: {json.dumps(snapshot)}\n\n"
+            if snapshot["finished"]:
+                break
+            time.sleep(0.25)
+        yield "event: end\ndata: {}\n\n"
+
+    return Response(
+        gen(),
+        mimetype="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 if __name__ == "__main__":

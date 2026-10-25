@@ -11,9 +11,14 @@ const progressBar = document.querySelector('#progress-bar');
 const progressElapsed = document.querySelector('#progress-elapsed');
 const progressTotal = document.querySelector('#progress-total');
 const stopBtn = document.querySelector('#stop-btn');
+const chartWrap = document.querySelector('#chart-wrap');
+const chart = document.querySelector('#live-chart');
+const chartMax = document.querySelector('#chart-max');
+const ctx = chart.getContext('2d');
 
 let timer = null;
 let currentRunId = null;
+let es = null;
 
 document.querySelector('#apply-suggestion').addEventListener('click', () => {
   const s = window.SYSTEM_PROFILE.suggested;
@@ -36,9 +41,6 @@ function startProgress(duration) {
     const pct = Math.min(elapsed / duration, 1) * 100;
     progressBar.style.width = `${pct}%`;
     progressElapsed.textContent = `${elapsed.toFixed(1)}s`;
-    if (elapsed >= duration) {
-      noteEl.textContent = 'Sonuclar toplaniyor...';
-    }
   }, 100);
 }
 
@@ -51,28 +53,79 @@ function tile(value, label, variant = '') {
   return `<div class="tile ${variant}"><div class="v">${value}</div><div class="k">${label}</div></div>`;
 }
 
-function renderResult(data) {
-  const failVariant = data.failed > 0 ? 'err' : 'ok';
+// Works for both a live snapshot ({done, ok}) and the final result ({requests, successful}).
+function renderTiles(d) {
+  const done = d.requests ?? d.done ?? 0;
+  const ok = d.successful ?? d.ok ?? 0;
+  const failed = d.failed ?? 0;
   tilesEl.innerHTML = [
-    tile(`${data.successful}/${data.requests}`, 'Basarili', failVariant),
-    tile(data.achieved_rps, 'Gercek RPS', 'accent'),
-    tile(`${data.avg_ms} ms`, 'Ortalama', ''),
-    tile(`${data.p95_ms} ms`, 'p95', 'warn'),
-    tile(`${data.p99_ms} ms`, 'p99', 'warn'),
-    tile(`${data.mib_per_second} MiB/s`, 'Veri hizi', ''),
+    tile(`${ok}/${done}`, 'Basarili', failed > 0 ? 'err' : 'ok'),
+    tile(d.achieved_rps ?? 0, 'Gercek RPS', 'accent'),
+    tile(failed, 'Hata', failed > 0 ? 'err' : ''),
+    tile(`${d.avg_ms ?? 0} ms`, 'Ortalama', ''),
+    tile(`${d.p95_ms ?? 0} ms`, 'p95', 'warn'),
+    tile(`${d.p99_ms ?? 0} ms`, 'p99', 'warn'),
   ].join('');
+}
 
-  statusesEl.innerHTML = Object.entries(data.statuses).map(([code, count]) => {
+function renderStatuses(statuses) {
+  statusesEl.innerHTML = Object.entries(statuses || {}).map(([code, count]) => {
     const good = /^[23]\d\d$/.test(code);
     return `<span class="pill ${good ? 'good' : 'bad'}">${code}: ${count}</span>`;
   }).join('');
+}
 
-  if (data.error_sample) {
-    errorEl.hidden = false;
-    errorEl.textContent = data.error_sample;
-  } else {
-    errorEl.hidden = true;
+function drawChart(values) {
+  const w = chart.clientWidth || 560;
+  const h = 150;
+  if (chart.width !== w) chart.width = w;
+  chart.height = h;
+  ctx.clearRect(0, 0, w, h);
+  if (!values || !values.length) { chartMax.textContent = ''; return; }
+  const top = Math.max(...values, 1);
+  const pad = 6;
+  const step = (w - 2 * pad) / Math.max(values.length - 1, 1);
+
+  ctx.strokeStyle = '#2b2f38';
+  ctx.lineWidth = 1;
+  for (const frac of [0.25, 0.5, 0.75]) {
+    const y = pad + (h - 2 * pad) * frac;
+    ctx.beginPath();
+    ctx.moveTo(pad, y);
+    ctx.lineTo(w - pad, y);
+    ctx.stroke();
   }
+
+  ctx.strokeStyle = '#4c8dff';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  values.forEach((v, i) => {
+    const x = pad + i * step;
+    const y = h - pad - (h - 2 * pad) * (v / top);
+    if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+  });
+  ctx.stroke();
+  chartMax.textContent = `max ${Math.round(top)} ms`;
+}
+
+function openStream(runId) {
+  if (!window.EventSource) return;
+  es = new EventSource(`/api/stream?run_id=${encodeURIComponent(runId)}`);
+  es.onmessage = (event) => {
+    let snap;
+    try { snap = JSON.parse(event.data); } catch { return; }
+    if (!snap || snap.finished === undefined) return;
+    renderTiles(snap);
+    renderStatuses(snap.statuses);
+    drawChart(snap.recent);
+    noteEl.textContent = `${snap.done} istek - ${snap.total_mib} MiB`;
+  };
+  es.addEventListener('end', () => { if (es) { es.close(); es = null; } });
+  es.onerror = () => { /* the awaited /api/run still delivers the final result */ };
+}
+
+function closeStream() {
+  if (es) { es.close(); es = null; }
 }
 
 form.addEventListener('submit', async (event) => {
@@ -114,8 +167,11 @@ form.addEventListener('submit', async (event) => {
   tilesEl.innerHTML = '';
   statusesEl.innerHTML = '';
   errorEl.hidden = true;
+  chartWrap.hidden = false;
+  drawChart([]);
   progressBar.style.width = '0%';
   startProgress(duration);
+  openStream(currentRunId);
 
   try {
     const response = await fetch('/api/run', {
@@ -139,13 +195,21 @@ form.addEventListener('submit', async (event) => {
       titleEl.textContent = hasFail ? 'Test tamamlandi - hata var' : 'Test tamamlandi';
       noteEl.textContent = `${data.requests} istek - ${data.total_mib} MiB toplam veri`;
     }
-    if (data.requests) renderResult(data);
+    if (data.requests) {
+      renderTiles(data);
+      renderStatuses(data.statuses);
+    }
+    if (data.error_sample) {
+      errorEl.hidden = false;
+      errorEl.textContent = data.error_sample;
+    }
   } catch (error) {
     stopProgress(false);
     setBadge('error', 'hata');
     titleEl.textContent = 'Test baslatilamadi';
     noteEl.textContent = error.message;
   } finally {
+    closeStream();
     currentRunId = null;
     stopBtn.hidden = true;
     runButton.hidden = false;

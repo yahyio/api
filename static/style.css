@@ -152,6 +152,13 @@ select { appearance:none; cursor:pointer; }
 .tile.warn .v { color:var(--warn); }
 .tile.accent .v { color:var(--accent); }
 
+/* --- live latency chart --- */
+.chart-wrap { margin-top:16px; background:var(--panel-2); border:1px solid var(--border);
+  border-radius:10px; padding:10px 12px; }
+.chart-head { display:flex; justify-content:space-between; color:var(--muted);
+  font-size:.72rem; font-family:var(--mono); margin-bottom:6px; }
+.chart { display:block; width:100%; height:150px; }
+
 .statuses { margin-top:12px; display:flex; flex-wrap:wrap; gap:6px; }
 .pill { font-family:var(--mono); font-size:.74rem; padding:4px 9px;
   border-radius:7px; background:#23272f; color:var(--fg); }
