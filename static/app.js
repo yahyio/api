@@ -27,6 +27,32 @@ document.querySelector('#apply-suggestion').addEventListener('click', () => {
   }
 });
 
+const presetMainBtn = document.querySelector('#preset-main');
+if (presetMainBtn) {
+  presetMainBtn.addEventListener('click', () => {
+    document.querySelector('#url').value = 'https://api.7xwon.com/main-events';
+    document.querySelector('#method').value = 'POST';
+    document.querySelector('#body').value = JSON.stringify({
+      type: 0,
+      odds: 1,
+      code: false,
+      s: 1,
+      t: false
+    }, null, 2);
+  });
+}
+
+const presetEventBtn = document.querySelector('#preset-event');
+if (presetEventBtn) {
+  presetEventBtn.addEventListener('click', () => {
+    document.querySelector('#url').value = 'https://api.7xwon.com/event';
+    document.querySelector('#method').value = 'POST';
+    document.querySelector('#body').value = JSON.stringify({
+      id: 36223071
+    }, null, 2);
+  });
+}
+
 function setBadge(state, text) {
   badgeEl.className = `badge ${state}`;
   badgeEl.textContent = text;

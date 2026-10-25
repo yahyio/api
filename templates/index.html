@@ -26,6 +26,10 @@
       <form id="test-form" class="card config" autocomplete="off">
         <div class="field full">
           <label for="url">Hedef URL</label>
+          <div style="display: flex; gap: 8px; margin-bottom: 6px;">
+            <button type="button" id="preset-main" class="ghost" style="font-size: 11px; padding: 4px 8px;">1. Ana Liste (/main-events)</button>
+            <button type="button" id="preset-event" class="ghost" style="font-size: 11px; padding: 4px 8px;">4. Tek Maç Detayı (/event)</button>
+          </div>
           <input id="url" name="url" value="{{ default_url }}" required spellcheck="false">
         </div>
 

@@ -32,7 +32,7 @@ class Stats:
         self.latencies = []
         self.lock = asyncio.Lock()
 
-async def worker(session, target_url, token, stats, timeout_sec):
+async def worker(session, target_url, payload, token, stats, timeout_sec):
     headers = dict(HEADERS)
     if token:
         headers["Authorization"] = f"Bearer {token}"
@@ -41,12 +41,10 @@ async def worker(session, target_url, token, stats, timeout_sec):
     try:
         async with session.post(
             target_url,
-            json=PAYLOAD,
+            json=payload,
             headers=headers,
             timeout=aiohttp.ClientTimeout(total=timeout_sec)
         ) as response:
-            # 123 KB'lık içeriği belleğe alıp CPU'yu yormuyoruz;
-            # sadece yanıtı tüketip statüsünü alıyoruz:
             await response.read()
             duration = (time.perf_counter() - start_time) * 1000
             
@@ -95,6 +93,8 @@ async def reporter(stats, interval=1.0):
 
 async def main():
     parser = argparse.ArgumentParser(description="Ultra-Lightweight Async API Load Tester")
+    parser.add_argument("--target", type=str, choices=["main", "event"], default="main", help="Hedef endpoint: 'main' (/main-events) veya 'event' (/event)")
+    parser.add_argument("--event-id", type=int, default=36223071, help="Tek maç detayı için maç id (Varsayılan: 36223071)")
     parser.add_argument("--rps", type=int, default=50, help="Saniyede hedeflenen istek sayısı (Varsayılan: 50)")
     parser.add_argument("--duration", type=int, default=60, help="Test süresi saniye cinsinden (Varsayılan: 60)")
     parser.add_argument("--token", type=str, default="", help="Bearer token (Opsiyonel)")
@@ -102,10 +102,17 @@ async def main():
     parser.add_argument("--odds", type=int, default=1, help="odds parametresi (1 veya 0, Varsayılan: 1)")
     args = parser.parse_args()
 
-    PAYLOAD["odds"] = args.odds
+    if args.target == "event":
+        target_url = "https://api.7xwon.com/event"
+        payload = {"id": args.event_id}
+    else:
+        target_url = "https://api.7xwon.com/main-events"
+        payload = dict(PAYLOAD)
+        payload["odds"] = args.odds
 
-    print(f"\n[+] Hedef: {URL}")
-    print(f"[+] Hedeflenen Hız: {args.rps} RPS | Süre: {args.duration}s | Timeout: {args.timeout}s | odds: {args.odds}")
+    print(f"\n[+] Hedef: {target_url}")
+    print(f"[+] Payload: {payload}")
+    print(f"[+] Hedeflenen Hız: {args.rps} RPS | Süre: {args.duration}s | Timeout: {args.timeout}s")
     print("[+] Motor: AsyncIO Event-Loop (CPU & RAM tasarruf modu aktif)")
 
     stats = Stats()
@@ -132,7 +139,7 @@ async def main():
             if (req_start - start_time) >= args.duration:
                 break
                 
-            task = asyncio.create_task(worker(session, URL, args.token, stats, args.timeout))
+            task = asyncio.create_task(worker(session, target_url, payload, args.token, stats, args.timeout))
             tasks.append(task)
             
             # Hassas zamanlama (Drift-free pacing)
