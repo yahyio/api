@@ -1,7 +1,10 @@
-"""Browser-based control panel for controlled API capacity checks."""
+"""Browser-based control panel for controlled API capacity checks.
+Optimized with AsyncIO & aiohttp for ultra-low PC CPU/RAM usage.
+"""
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import platform
@@ -9,21 +12,20 @@ import statistics
 import threading
 import time
 from collections import Counter, deque
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.parse import urlparse
 
-import requests
+import aiohttp
 from flask import Flask, Response, jsonify, render_template, request
 
 try:
     import psutil
-except ImportError:  # Docker installs psutil; retain a useful fallback.
+except ImportError:
     psutil = None
 
 
-MAX_RPS = 100
+MAX_RPS = 1000
 MAX_DURATION = 3600
-MAX_THREADS = 32
+MAX_THREADS = 100
 DEFAULT_URL = "https://api.7xwon.com/main-events"
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -31,10 +33,8 @@ USER_AGENT = (
 )
 
 app = Flask(__name__)
-app.config["MAX_CONTENT_LENGTH"] = 16 * 1024
+app.config["MAX_CONTENT_LENGTH"] = 32 * 1024
 
-# In-flight runs keyed by a client-supplied run id, so /api/stop can cancel a
-# test while /api/run is still blocking in another request thread.
 ACTIVE_RUNS: dict[str, "RunState"] = {}
 ACTIVE_RUNS_LOCK = threading.Lock()
 
@@ -100,18 +100,13 @@ def system_profile():
     if psutil is not None:
         memory_gib = round(psutil.virtual_memory().total / 1024**3, 1)
 
-    # These values are deliberately client-side conservative. They only size
-    # this tool's connection pool; they do not predict origin capacity.
-    threads = min(MAX_THREADS, max(2, cores * 2))
-    rps = min(MAX_RPS, max(5, cores * 10))
-    if memory_gib is not None and memory_gib < 4:
-        rps = min(rps, 20)
-        threads = min(threads, 8)
+    threads = min(MAX_THREADS, max(10, cores * 5))
+    rps = min(MAX_RPS, max(50, cores * 25))
     return {
         "os": f"{platform.system()} {platform.release()}",
         "cores": cores,
         "memory_gib": memory_gib,
-        "suggested": {"rps": rps, "threads": threads, "duration": 20, "timeout": 10},
+        "suggested": {"rps": rps, "threads": threads, "duration": 30, "timeout": 5},
     }
 
 
@@ -119,11 +114,11 @@ def validate_config(data):
     url = str(data.get("url", "")).strip()
     parsed = urlparse(url)
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-        raise ValueError("Geçerli bir http:// veya https:// URL gir.")
+        raise ValueError("Gecerli bir http:// veya https:// URL gir.")
 
     method = str(data.get("method", "GET")).upper()
     if method not in {"GET", "POST", "PUT", "PATCH", "DELETE"}:
-        raise ValueError("Geçersiz HTTP metodu.")
+        raise ValueError("Gecersiz HTTP metodu.")
 
     try:
         rps = int(data.get("rps", 1))
@@ -131,71 +126,114 @@ def validate_config(data):
         threads = int(data.get("threads", 1))
         timeout = float(data.get("timeout", 10))
     except (TypeError, ValueError) as exc:
-        raise ValueError("RPS, süre, thread ve timeout sayı olmalı.") from exc
+        raise ValueError("RPS, sure, thread ve timeout sayi olmali.") from exc
 
     if not 1 <= rps <= MAX_RPS:
-        raise ValueError(f"RPS 1–{MAX_RPS} arasında olmalı.")
+        raise ValueError(f"RPS 1-{MAX_RPS} arasinda olmali.")
     if not 1 <= duration <= MAX_DURATION:
-        raise ValueError(f"Süre 1–{MAX_DURATION} saniye arasında olmalı.")
+        raise ValueError(f"Sure 1-{MAX_DURATION} saniye arasinda olmali.")
     if not 1 <= threads <= MAX_THREADS:
-        raise ValueError(f"Thread 1–{MAX_THREADS} arasında olmalı.")
+        raise ValueError(f"Thread 1-{MAX_THREADS} arasinda olmali.")
     if not 1 <= timeout <= 30:
-        raise ValueError("Timeout 1–30 saniye arasında olmalı.")
+        raise ValueError("Timeout 1-30 saniye arasinda olmali.")
 
     body = None
     if method in {"POST", "PUT", "PATCH"}:
         body = data.get("body") or None
         if body is not None and not isinstance(body, (dict, list)):
-            raise ValueError("JSON body nesne veya dizi olmalı.")
+            raise ValueError("JSON body nesne veya dizi olmali.")
     return url, method, rps, duration, threads, timeout, body
 
 
-def one_request(session, url, method, headers, timeout, body):
-    started = time.perf_counter()
-    try:
-        response = session.request(method, url, headers=headers, json=body, timeout=timeout)
-        elapsed = (time.perf_counter() - started) * 1000
-        return response.status_code, elapsed, len(response.content), None
-    except requests.RequestException as exc:
-        return None, (time.perf_counter() - started) * 1000, 0, str(exc)
+async def _async_worker(session, method, url, headers, body, timeout, sem, state, results):
+    if state.stop_event.is_set():
+        return
+    async with sem:
+        if state.stop_event.is_set():
+            return
+        started = time.perf_counter()
+        try:
+            client_timeout = aiohttp.ClientTimeout(total=timeout)
+            kwargs = {"headers": headers, "timeout": client_timeout}
+            if body is not None and method in {"POST", "PUT", "PATCH"}:
+                kwargs["json"] = body
+
+            async with session.request(method, url, **kwargs) as resp:
+                # Read chunks to compute size without massive memory allocations
+                size = 0
+                error_msg = None
+                if resp.status >= 400:
+                    raw = await resp.read()
+                    size = len(raw)
+                    error_msg = f"HTTP {resp.status}"
+                else:
+                    # Stream read without keeping full payload in memory
+                    async for chunk in resp.content.iter_chunked(16384):
+                        size += len(chunk)
+                
+                elapsed = (time.perf_counter() - started) * 1000
+                res = (resp.status, elapsed, size, error_msg)
+                results.append(res)
+                state.record(*res)
+        except asyncio.TimeoutError:
+            elapsed = (time.perf_counter() - started) * 1000
+            res = (None, elapsed, 0, f"Read timed out ({timeout}s)")
+            results.append(res)
+            state.record(*res)
+        except Exception as exc:
+            elapsed = (time.perf_counter() - started) * 1000
+            res = (None, elapsed, 0, str(exc))
+            results.append(res)
+            state.record(*res)
 
 
-def run_check(url, method, rps, duration, threads, timeout, token, body, state):
-    stop_event = state.stop_event
-    headers = {"Accept": "application/json", "User-Agent": USER_AGENT}
+async def _async_run_check(url, method, rps, duration, concurrency, timeout, token, body, state):
+    headers = {
+        "Accept": "application/json",
+        "User-Agent": USER_AGENT,
+        "Content-Type": "application/json"
+    }
     if token:
         headers["Authorization"] = f"Bearer {token}"
 
-    local = threading.local()
+    sem = asyncio.Semaphore(concurrency)
+    connector = aiohttp.TCPConnector(
+        limit=0,
+        limit_per_host=0,
+        keepalive_timeout=30.0,
+        enable_cleanup_closed=True
+    )
 
-    def work():
-        if not hasattr(local, "session"):
-            local.session = requests.Session()
-        return one_request(local.session, url, method, headers, timeout, body)
-
-    total = rps * duration
-    started = time.perf_counter()
-    futures = []
     results = []
-    with ThreadPoolExecutor(max_workers=threads) as pool:
-        for index in range(total):
-            if stop_event.is_set():
-                break
-            due = started + (index / rps)
-            pause = due - time.perf_counter()
-            if pause > 0:
-                # Interruptible wait: a stop is honoured within the pacing gap
-                # instead of sleeping through it.
-                if stop_event.wait(pause):
-                    break
-            futures.append(pool.submit(work))
-        for future in as_completed(futures):
-            result = future.result()
-            results.append(result)
-            state.record(*result)  # feed live counters consumed by /api/stream
+    total_requests = rps * duration
+    interval = 1.0 / rps if rps > 0 else 0
+    start_time = time.perf_counter()
+    tasks = []
 
-    elapsed = max(time.perf_counter() - started, 1e-9)
-    stopped = stop_event.is_set()
+    async with aiohttp.ClientSession(connector=connector) as session:
+        for index in range(total_requests):
+            if state.stop_event.is_set():
+                break
+            now = time.perf_counter()
+            if (now - start_time) >= duration:
+                break
+
+            due = start_time + (index * interval)
+            pause = due - now
+            if pause > 0:
+                await asyncio.sleep(pause)
+
+            task = asyncio.create_task(
+                _async_worker(session, method, url, headers, body, timeout, sem, state, results)
+            )
+            tasks.append(task)
+
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    elapsed = max(time.perf_counter() - start_time, 1e-9)
+    stopped = state.stop_event.is_set()
+
     if not results:
         return {
             "requests": 0, "successful": 0, "failed": 0, "achieved_rps": 0,
@@ -203,15 +241,18 @@ def run_check(url, method, rps, duration, threads, timeout, token, body, state):
             "total_mib": 0, "mib_per_second": 0, "statuses": {},
             "error_sample": None, "stopped": stopped,
         }
+
     latencies = sorted(item[1] for item in results)
     statuses = {}
     for status, _, _, _ in results:
         key = str(status) if status is not None else "ERR"
         statuses[key] = statuses.get(key, 0) + 1
+
     successful = sum(200 <= status < 400 for status, _, _, _ in results if status is not None)
     bytes_received = sum(item[2] for item in results)
     errors = [item[3] for item in results if item[3]]
     percentile = lambda percent: latencies[round((len(latencies) - 1) * percent / 100)]
+
     return {
         "requests": len(results),
         "successful": successful,
@@ -227,6 +268,11 @@ def run_check(url, method, rps, duration, threads, timeout, token, body, state):
         "error_sample": errors[0][:220] if errors else None,
         "stopped": stopped,
     }
+
+
+def run_check(url, method, rps, duration, threads, timeout, token, body, state):
+    # Runs the ultra-efficient async engine in the worker thread
+    return asyncio.run(_async_run_check(url, method, rps, duration, threads, timeout, token, body, state))
 
 
 @app.get("/")
@@ -246,10 +292,9 @@ def run():
         url, method, rps, duration, threads, timeout, body = validate_config(data)
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
-    # The confirmation is explicit so a pasted configuration cannot silently
-    # start traffic against an endpoint.
+
     if data.get("confirm") is not True:
-        return jsonify({"error": "Test sahipliği onayı gerekli."}), 400
+        return jsonify({"error": "Test sahipligi onayi gerekli."}), 400
 
     run_id = str(data.get("run_id", "")).strip()
     state = RunState(rps * duration)
@@ -277,7 +322,7 @@ def stop():
     with ACTIVE_RUNS_LOCK:
         state = ACTIVE_RUNS.get(run_id)
     if state is None:
-        return jsonify({"stopped": False, "error": "Aktif test bulunamadı."}), 404
+        return jsonify({"stopped": False, "error": "Aktif test bulunamadi."}), 404
     state.stop_event.set()
     return jsonify({"stopped": True})
 
@@ -288,7 +333,7 @@ def stream():
 
     def gen():
         state = None
-        for _ in range(60):  # wait up to ~3s for the run to register
+        for _ in range(60):
             with ACTIVE_RUNS_LOCK:
                 state = ACTIVE_RUNS.get(run_id)
             if state is not None:

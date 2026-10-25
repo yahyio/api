@@ -212,44 +212,47 @@ def _do_request(url, method, data, headers, timeout, session=None):
     start = time.perf_counter()
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
-            payload = resp.read()
-            return resp.status, (time.perf_counter() - start) * 1000, len(payload), None
+            size = 0
+            while True:
+                chunk = resp.read(16384)
+                if not chunk:
+                    break
+                size += len(chunk)
+            return resp.status, (time.perf_counter() - start) * 1000, size, None
     except urllib.error.HTTPError as e:
-        # Keep the response body: APIs commonly explain auth/method/payload
-        # failures there (401, 403, 405, 422), and hiding it makes diagnosis
-        # unnecessarily difficult.
         try:
-            detail = e.read().decode("utf-8", errors="replace").strip()
+            detail = e.read(500).decode("utf-8", errors="replace").strip()
         except Exception:  # noqa: BLE001
             detail = ""
-        if len(detail) > 500:
-            detail = detail[:500] + "..."
         message = f"HTTP {e.code}"
         if detail:
             message += f": {detail}"
         return e.code, (time.perf_counter() - start) * 1000, 0, message
-    except Exception as e:  # noqa: BLE001 - surface any transport error to the UI
+    except Exception as e:  # noqa: BLE001
         return None, (time.perf_counter() - start) * 1000, 0, str(e)
 
 
 def _do_request_requests(url, method, data, headers, timeout, session=None):
-    """Use Requests when installed; it provides a more complete HTTP stack."""
+    """Use Requests with stream=True to prevent massive RAM and GC spikes on local PC."""
     body = data if method in ("POST", "PUT", "PATCH") else None
     start = time.perf_counter()
     try:
         client = session or requests
         response = client.request(
-            method, url, data=body, headers=headers, timeout=timeout)
-        payload = response.content
+            method, url, data=body, headers=headers, timeout=timeout, stream=True)
+        size = 0
         if response.status_code >= 400:
-            detail = payload.decode("utf-8", errors="replace").strip()
-            if len(detail) > 500:
-                detail = detail[:500] + "..."
+            raw = response.raw.read(500)
+            detail = raw.decode("utf-8", errors="replace").strip()
             message = f"HTTP {response.status_code}"
             if detail:
                 message += f": {detail}"
-            return response.status_code, (time.perf_counter() - start) * 1000, len(payload), message
-        return response.status_code, (time.perf_counter() - start) * 1000, len(payload), None
+            return response.status_code, (time.perf_counter() - start) * 1000, len(raw), message
+
+        # Stream chunks without loading entire payload into RAM
+        for chunk in response.iter_content(chunk_size=16384):
+            size += len(chunk)
+        return response.status_code, (time.perf_counter() - start) * 1000, size, None
     except requests.RequestException as e:
         return None, (time.perf_counter() - start) * 1000, 0, str(e)
 
@@ -336,7 +339,7 @@ class App:
         mcol.pack(side="left")
         ttk.Label(mcol, text="Method", style="Muted.TLabel",
                   font=("Segoe UI", 9)).pack(anchor="w")
-        self.method_var = tk.StringVar(value="GET")
+        self.method_var = tk.StringVar(value="POST")
         ttk.Combobox(mcol, textvariable=self.method_var, width=8, state="readonly",
                      values=["GET", "POST", "PUT", "PATCH", "DELETE"]).pack()
 
