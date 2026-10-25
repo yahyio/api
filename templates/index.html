@@ -52,8 +52,35 @@
           <div class="field"><label for="timeout">Timeout <small>sn</small></label><input id="timeout" name="timeout" type="number" min="1" max="30" value="{{ profile.suggested.timeout }}"></div>
         </div>
 
+        <div class="field full scenarios-wrap">
+          <label>Aktif Test Modülleri (Seçtiklerin Bu Run'da Çalışır)</label>
+          <div class="scenarios-grid">
+            <label class="scenario-card">
+              <input type="checkbox" id="sc_main" name="sc_main" checked>
+              <div class="sc-content">
+                <strong>Ana Liste (/main-events)</strong>
+                <small>100 maçlık bülten ve canlı oran akışını zorlar</small>
+              </div>
+            </label>
+            <label class="scenario-card">
+              <input type="checkbox" id="sc_all_matches" name="sc_all_matches" checked>
+              <div class="sc-content">
+                <strong>Tüm Canlı Maçlar (/event)</strong>
+                <small>Canlıdaki tüm maçları çekip farklı maçlara aynı anda yüklenir</small>
+              </div>
+            </label>
+            <label class="scenario-card">
+              <input type="checkbox" id="sc_cascading" name="sc_cascading">
+              <div class="sc-content">
+                <strong>Cascading Abort (1. Kural / Stampede)</strong>
+                <small>2.5s gecikmede iptal edip hemen yenisini ateşler</small>
+              </div>
+            </label>
+          </div>
+        </div>
+
         <div class="field full">
-          <label for="body">JSON body <small>POST / PUT / PATCH</small></label>
+          <label for="body">JSON body <small>POST / PUT / PATCH (Özelleştirilmiş)</small></label>
           <textarea id="body" name="body" spellcheck="false" placeholder='{"key":"value"}'>{
   "type": 0,
   "odds": 1,

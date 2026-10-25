@@ -172,6 +172,13 @@ form.addEventListener('submit', async (event) => {
   currentRunId = (crypto.randomUUID && crypto.randomUUID()) || String(Date.now() + Math.random());
   const payload = Object.fromEntries(new FormData(form));
   const duration = +payload.duration;
+  
+  const scenarios = {
+    main: !!document.querySelector('#sc_main')?.checked,
+    all_matches: !!document.querySelector('#sc_all_matches')?.checked,
+    cascading: !!document.querySelector('#sc_cascading')?.checked
+  };
+
   Object.assign(payload, {
     rps: +payload.rps,
     threads: +payload.threads,
@@ -180,6 +187,7 @@ form.addEventListener('submit', async (event) => {
     body,
     confirm: document.querySelector('#confirm').checked,
     run_id: currentRunId,
+    scenarios,
   });
 
   // running state: swap the start button for a stop button

