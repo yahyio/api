@@ -31,6 +31,11 @@ USER_AGENT = (
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 16 * 1024
 
+# In-flight runs keyed by a client-supplied run id, so /api/stop can cancel a
+# test while /api/run is still blocking in another request thread.
+ACTIVE_RUNS: dict[str, threading.Event] = {}
+ACTIVE_RUNS_LOCK = threading.Lock()
+
 
 def system_profile():
     cores = os.cpu_count() or 2
@@ -98,7 +103,9 @@ def one_request(session, url, method, headers, timeout, body):
         return None, (time.perf_counter() - started) * 1000, 0, str(exc)
 
 
-def run_check(url, method, rps, duration, threads, timeout, token, body):
+def run_check(url, method, rps, duration, threads, timeout, token, body, stop_event=None):
+    if stop_event is None:
+        stop_event = threading.Event()
     headers = {"Accept": "application/json", "User-Agent": USER_AGENT}
     if token:
         headers["Authorization"] = f"Bearer {token}"
@@ -115,14 +122,27 @@ def run_check(url, method, rps, duration, threads, timeout, token, body):
     futures = []
     with ThreadPoolExecutor(max_workers=threads) as pool:
         for index in range(total):
+            if stop_event.is_set():
+                break
             due = started + (index / rps)
             pause = due - time.perf_counter()
             if pause > 0:
-                time.sleep(pause)
+                # Interruptible wait: a stop is honoured within the pacing gap
+                # instead of sleeping through it.
+                if stop_event.wait(pause):
+                    break
             futures.append(pool.submit(work))
         results = [future.result() for future in as_completed(futures)]
 
-    elapsed = time.perf_counter() - started
+    elapsed = max(time.perf_counter() - started, 1e-9)
+    stopped = stop_event.is_set()
+    if not results:
+        return {
+            "requests": 0, "successful": 0, "failed": 0, "achieved_rps": 0,
+            "avg_ms": 0, "p95_ms": 0, "p99_ms": 0, "response_bytes_avg": 0,
+            "total_mib": 0, "mib_per_second": 0, "statuses": {},
+            "error_sample": None, "stopped": stopped,
+        }
     latencies = sorted(item[1] for item in results)
     statuses = {}
     for status, _, _, _ in results:
@@ -145,6 +165,7 @@ def run_check(url, method, rps, duration, threads, timeout, token, body):
         "mib_per_second": round(bytes_received / elapsed / 1024**2, 3),
         "statuses": statuses,
         "error_sample": errors[0][:220] if errors else None,
+        "stopped": stopped,
     }
 
 
@@ -169,9 +190,35 @@ def run():
     # start traffic against an endpoint.
     if data.get("confirm") is not True:
         return jsonify({"error": "Test sahipliği onayı gerekli."}), 400
-    result = run_check(url, method, rps, duration, threads, timeout, str(data.get("token", "")).strip(), body)
+
+    run_id = str(data.get("run_id", "")).strip()
+    stop_event = threading.Event()
+    if run_id:
+        with ACTIVE_RUNS_LOCK:
+            ACTIVE_RUNS[run_id] = stop_event
+    try:
+        result = run_check(
+            url, method, rps, duration, threads, timeout,
+            str(data.get("token", "")).strip(), body, stop_event,
+        )
+    finally:
+        if run_id:
+            with ACTIVE_RUNS_LOCK:
+                ACTIVE_RUNS.pop(run_id, None)
     return jsonify(result)
 
 
+@app.post("/api/stop")
+def stop():
+    data = request.get_json(silent=True) or {}
+    run_id = str(data.get("run_id", "")).strip()
+    with ACTIVE_RUNS_LOCK:
+        event = ACTIVE_RUNS.get(run_id)
+    if event is None:
+        return jsonify({"stopped": False, "error": "Aktif test bulunamadı."}), 404
+    event.set()
+    return jsonify({"stopped": True})
+
+
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.getenv("PORT", "8080")), debug=False)
+    app.run(host="0.0.0.0", port=int(os.getenv("PORT", "8080")), debug=False, threaded=True)

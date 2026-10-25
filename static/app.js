@@ -10,8 +10,10 @@ const progressWrap = document.querySelector('#progress-wrap');
 const progressBar = document.querySelector('#progress-bar');
 const progressElapsed = document.querySelector('#progress-elapsed');
 const progressTotal = document.querySelector('#progress-total');
+const stopBtn = document.querySelector('#stop-btn');
 
 let timer = null;
+let currentRunId = null;
 
 document.querySelector('#apply-suggestion').addEventListener('click', () => {
   const s = window.SYSTEM_PROFILE.suggested;
@@ -88,6 +90,7 @@ form.addEventListener('submit', async (event) => {
     }
   }
 
+  currentRunId = (crypto.randomUUID && crypto.randomUUID()) || String(Date.now() + Math.random());
   const payload = Object.fromEntries(new FormData(form));
   const duration = +payload.duration;
   Object.assign(payload, {
@@ -97,11 +100,14 @@ form.addEventListener('submit', async (event) => {
     timeout: +payload.timeout,
     body,
     confirm: document.querySelector('#confirm').checked,
+    run_id: currentRunId,
   });
 
-  // running state
-  runButton.disabled = true;
-  runButton.textContent = 'Test suruyor...';
+  // running state: swap the start button for a stop button
+  runButton.hidden = true;
+  stopBtn.hidden = false;
+  stopBtn.disabled = false;
+  stopBtn.textContent = 'Durdur';
   setBadge('running', 'calisiyor');
   titleEl.textContent = 'Test suruyor';
   noteEl.textContent = 'Istekler gonderiliyor...';
@@ -121,18 +127,43 @@ form.addEventListener('submit', async (event) => {
     if (!response.ok) throw new Error(data.error || 'Test baslatilamadi.');
 
     stopProgress(true);
-    const hasFail = data.failed > 0;
-    setBadge(hasFail ? 'error' : 'done', hasFail ? 'hata var' : 'tamam');
-    titleEl.textContent = hasFail ? 'Test tamamlandi - hata var' : 'Test tamamlandi';
-    noteEl.textContent = `${data.requests} istek - ${data.total_mib} MiB toplam veri`;
-    renderResult(data);
+    if (data.stopped) {
+      setBadge('idle', 'durduruldu');
+      titleEl.textContent = 'Test durduruldu';
+      noteEl.textContent = data.requests
+        ? `${data.requests} istek tamamlandi - ${data.total_mib} MiB`
+        : 'Test veri toplanmadan durduruldu.';
+    } else {
+      const hasFail = data.failed > 0;
+      setBadge(hasFail ? 'error' : 'done', hasFail ? 'hata var' : 'tamam');
+      titleEl.textContent = hasFail ? 'Test tamamlandi - hata var' : 'Test tamamlandi';
+      noteEl.textContent = `${data.requests} istek - ${data.total_mib} MiB toplam veri`;
+    }
+    if (data.requests) renderResult(data);
   } catch (error) {
     stopProgress(false);
     setBadge('error', 'hata');
     titleEl.textContent = 'Test baslatilamadi';
     noteEl.textContent = error.message;
   } finally {
+    currentRunId = null;
+    stopBtn.hidden = true;
+    runButton.hidden = false;
     runButton.disabled = false;
     runButton.textContent = 'Testi baslat';
   }
+});
+
+stopBtn.addEventListener('click', async () => {
+  if (!currentRunId) return;
+  stopBtn.disabled = true;
+  stopBtn.textContent = 'Durduruluyor...';
+  noteEl.textContent = 'Test durduruluyor...';
+  try {
+    await fetch('/api/stop', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ run_id: currentRunId }),
+    });
+  } catch { /* the pending /api/run will still resolve with partial data */ }
 });

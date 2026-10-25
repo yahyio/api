@@ -96,6 +96,16 @@ select { appearance:none; cursor:pointer; }
 .run:active { transform:translateY(1px); }
 .run:disabled { background:#2b2f38; color:var(--muted); cursor:wait; }
 
+.stop {
+  grid-column:1/-1; margin-top:2px; padding:13px;
+  background:var(--err); color:#fff; border:0; border-radius:9px;
+  font:inherit; font-weight:700; font-size:.95rem; cursor:pointer;
+  transition:background .15s, transform .05s;
+}
+.stop:hover { background:#d2574b; }
+.stop:active { transform:translateY(1px); }
+.stop:disabled { background:#2b2f38; color:var(--muted); cursor:wait; }
+
 .ghost {
   background:transparent; color:var(--accent);
   border:1px solid var(--border); border-radius:8px;
