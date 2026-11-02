@@ -1,6 +1,12 @@
 """
-Otomatik Cloudflare Bypass + Modern Canli Dashboard Load Tester
-Windows CMD kilitlenmelerini onleyen, anlik kendini yenileyen temiz arayuz.
+Gercek Kullanici Davranisi Simulatörü (1000 Kullanici Stres & Kapasite Testi)
+Sitedeki gercek insan trafigini taklit eder:
+- %50 Ana bülten polling (/api/main-events)
+- %30 Rastgele farkli canli maclarin detaylarina girme (/api/event)
+- %10 Kullanici profil / bakiye kontrolü (/api/user)
+- %10 Ozel oranlar ve mac listesi sorgulama (/api/special-odds & /api/matches)
+
+Her istek benzersiz zaman damgasiyla (Cache-Bust) sunucunun veritabanini ve backend CPU'sunu calistirir.
 """
 
 import asyncio
@@ -21,16 +27,7 @@ try:
 except ImportError:
     uc = None
 
-API_MAIN = "https://www.7xwon.com/api/main-events"
-API_EVENT = "https://www.7xwon.com/api/event"
-
-DEFAULT_PAYLOAD = {
-    "type": 0,
-    "odds": 1,
-    "code": False,
-    "s": 1,
-    "t": False
-}
+API_BASE = "https://www.7xwon.com/api"
 
 
 def get_fresh_cookie_and_ua():
@@ -82,19 +79,21 @@ class Metrics:
             code_str = str(status) if status else "ERR"
             self.status_codes[code_str] = self.status_codes.get(code_str, 0) + 1
             self.latencies.append(latency_ms)
-            if len(self.latencies) > 300:
+            if len(self.latencies) > 500:
                 self.latencies.pop(0)
 
     def calc_stats(self):
         elapsed = max(time.time() - self.start_time, 0.001)
         avg_ms = sum(self.latencies) / len(self.latencies) if self.latencies else 0.0
         sorted_l = sorted(self.latencies) if self.latencies else [0]
+        p50 = sorted_l[int(len(sorted_l) * 0.50)]
         p95 = sorted_l[int(len(sorted_l) * 0.95)]
         p99 = sorted_l[int(len(sorted_l) * 0.99)]
         success_rate = (self.ok / self.total_sent * 100) if self.total_sent else 0.0
         return {
             "elapsed": elapsed,
             "avg_ms": avg_ms,
+            "p50": p50,
             "p95": p95,
             "p99": p99,
             "success_rate": success_rate,
@@ -107,36 +106,38 @@ def make_dashboard(m: Metrics):
     rem = max(0, int(m.duration - s["elapsed"]))
 
     table = Table(
-        title=f"[bold bright_blue]LOAD TEST CANLI PANEL[/]  |  Mod: [bold cyan]{m.mode.upper()}[/]  |  Hedef: [bold yellow]{m.target_rps} RPS[/]",
+        title=f"[bold bright_blue]7XWON GERCEK KULLANICI YUK PANELİ[/]  |  Mod: [bold cyan]{m.mode.upper()}[/]  |  Hedef: [bold yellow]{m.target_rps} RPS[/]",
         box=box.ROUNDED,
         header_style="bold bright_white",
         expand=True
     )
 
     table.add_column("Anlik RPS", justify="center", style="bold green" if m.instant_rps > 0 else "yellow")
-    table.add_column("Toplam RPS", justify="center", style="cyan")
     table.add_column("Gonderilen", justify="center", style="white")
     table.add_column("Basarili (200)", justify="center", style="bold green")
     table.add_column("Hata", justify="center", style="bold red" if m.failed > 0 else "dim")
-    table.add_column("Basari Orani", justify="center", style="green" if s["success_rate"] >= 95 else "red")
-    table.add_column("Ort. Latency", justify="center", style="magenta")
-    table.add_column("p95", justify="center", style="yellow")
-    table.add_column("Kalan", justify="center", style="bold cyan")
+    table.add_column("Basari %", justify="center", style="green" if s["success_rate"] >= 95 else "red")
+    table.add_column("Ort. Latency", justify="center", style="cyan bold")
+    table.add_column("Medyan (p50)", justify="center", style="blue")
+    table.add_column("Gecikme (p95)", justify="center", style="yellow bold" if s["p95"] < 400 else "bold red")
+    table.add_column("Max Gecikme (p99)", justify="center", style="red bold")
+    table.add_column("Kalan", justify="center", style="bold magenta")
 
     table.add_row(
         f"{m.instant_rps:.1f} /s",
-        f"{s['overall_rps']:.1f} /s",
         str(m.total_sent),
         str(m.ok),
         str(m.failed),
         f"%{s['success_rate']:.1f}",
         f"{s['avg_ms']:.1f} ms",
+        f"{s['p50']:.1f} ms",
         f"{s['p95']:.1f} ms",
+        f"{s['p99']:.1f} ms",
         f"{rem} sn"
     )
 
     codes = "   ".join([f"[{'bold green' if k=='200' else 'bold red'}]{k}[/]: {v}" for k, v in m.status_codes.items()]) or "Bekleniyor..."
-    footer = Text.from_markup(f"  [bold]HTTP Kod Dagilimi:[/] {codes}")
+    footer = Text.from_markup(f"  [bold]HTTP Kod Dagilimi:[/] {codes}  |  [bold yellow]Backend Yük Durumu:[/] {'NORMAL' if s['p95'] < 300 else 'SUNUCU YAVAŞLIYOR (Darboğaz)' if s['p95'] < 1000 else 'KRİTİK GECİKME'}")
 
     return Panel(
         table,
@@ -146,12 +147,19 @@ def make_dashboard(m: Metrics):
     )
 
 
-async def worker(session: AsyncSession, url: str, payload: dict, headers: dict, metrics: Metrics, timeout: float):
+async def worker(session: AsyncSession, method: str, url: str, payload: dict | None, headers: dict, metrics: Metrics, timeout: float):
     t0 = time.perf_counter()
     status = None
     err = None
     try:
-        resp = await session.post(url, json=payload, headers=headers, impersonate="chrome120", timeout=timeout)
+        kwargs = {"headers": headers, "timeout": timeout, "impersonate": "chrome120"}
+        if payload is not None and method == "POST":
+            kwargs["json"] = payload
+        
+        if method == "POST":
+            resp = await session.post(url, **kwargs)
+        else:
+            resp = await session.get(url, **kwargs)
         status = resp.status_code
     except Exception as e:
         err = e
@@ -160,9 +168,8 @@ async def worker(session: AsyncSession, url: str, payload: dict, headers: dict, 
 
 
 async def main():
-    parser = argparse.ArgumentParser(description="Auto Cloudflare Bypass Live Dashboard Load Tester")
-    parser.add_argument("--target", choices=["main", "event", "both"], default="both", help="main, event veya both")
-    parser.add_argument("--rps", type=int, default=50, help="Saniyede istek")
+    parser = argparse.ArgumentParser(description="Multi-Scenario Realistic Load Tester")
+    parser.add_argument("--rps", type=int, default=100, help="Saniyede istek (Orn: 50, 100, 200, 500)")
     parser.add_argument("--duration", type=int, default=60, help="Sure (saniye)")
     parser.add_argument("--token", type=str, default="sGbBgXsmnX78Gp2BYZnz", help="Bearer token")
     parser.add_argument("--cookie", type=str, default="", help="Cookie / cf_clearance")
@@ -174,7 +181,6 @@ async def main():
     cookie = args.cookie
     ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/156.0.0.0 Safari/537.36"
 
-    # Otomatik Cloudflare Bypass
     if not cookie:
         console.print("[cyan][*] Cloudflare kontrol ediliyor, taze oturum aliniyor...[/]")
         fresh_cookie, fresh_ua = get_fresh_cookie_and_ua()
@@ -197,28 +203,28 @@ async def main():
     if cookie:
         headers["Cookie"] = cookie
 
-    metrics = Metrics(args.rps, args.duration, args.target)
+    metrics = Metrics(args.rps, args.duration, "GERÇEK KULLANICI DAĞILIMI")
 
     # Canli mac ID'lerini cek
     event_ids = [36246068, 36245965, 36269546]
     async with AsyncSession() as s:
         try:
-            r = await s.post(API_MAIN, json={"type": 0, "odds": 0, "code": False, "s": 1, "t": False}, headers=headers, impersonate="chrome120", timeout=5)
+            r = await s.post(f"{API_BASE}/main-events", json={"type": 0, "odds": 0, "code": False, "s": 1, "t": False}, headers=headers, impersonate="chrome120", timeout=5)
             if r.status_code == 200:
                 data = r.json().get("data", [])
                 eids = [x.get("eventid") or x.get("id") for x in data if isinstance(x, dict)]
                 event_ids = [e for e in eids if e] or event_ids
+                console.print(f"[green][+] {len(event_ids)} adet canlı maç simülasyon havuzuna alındı.[/]")
         except Exception:
             pass
 
     sem = asyncio.Semaphore(args.concurrency)
     interval = 1.0 / max(args.rps, 1)
 
-    async def bounded_worker(sess, url, body):
+    async def bounded_worker(sess, method, url, body):
         async with sem:
-            await worker(sess, url, body, headers, metrics, args.timeout)
+            await worker(sess, method, url, body, headers, metrics, args.timeout)
 
-    # Anlik RPS ticker
     async def ticker():
         while True:
             await asyncio.sleep(1.0)
@@ -228,27 +234,40 @@ async def main():
 
     ticker_task = asyncio.create_task(ticker())
 
-    # Canli yenilenen panel
     with Live(make_dashboard(metrics), refresh_per_second=4, console=console) as live:
         async with AsyncSession() as session:
             start = time.time()
-            idx = 0
             tasks = []
             while (time.time() - start) < args.duration:
                 t_start = time.perf_counter()
                 
-                if args.target == "both":
-                    if idx % 2 == 0:
-                        url, body = API_MAIN, DEFAULT_PAYLOAD
-                    else:
-                        url, body = API_EVENT, {"id": random.choice(event_ids)}
-                elif args.target == "event":
-                    url, body = API_EVENT, {"id": random.choice(event_ids)}
+                # Gercek Kullanici Trafik Simülasyonu (Ağır backend sorguları)
+                dice = random.random()
+                ts = time.time_ns()
+                
+                if dice < 0.50:
+                    # %50: Ana Liste (Cache-Bust ile doğrudan DB sorgusu)
+                    method = "POST"
+                    url = f"{API_BASE}/main-events?_t={ts}"
+                    body = {"type": 0, "odds": 1, "code": False, "s": 1, "t": False, "_cb": ts}
+                elif dice < 0.80:
+                    # %30: Farklı canlı maçların detaylarını çekme (Ağır hesaplama)
+                    method = "POST"
+                    target_id = random.choice(event_ids)
+                    url = f"{API_BASE}/event?_t={ts}"
+                    body = {"id": target_id, "_cb": ts}
+                elif dice < 0.90:
+                    # %10: Kullanıcı profil ve bakiye verisi
+                    method = "GET"
+                    url = f"{API_BASE}/user?_t={ts}"
+                    body = None
                 else:
-                    url, body = API_MAIN, DEFAULT_PAYLOAD
+                    # %10: Özel oranlar bülteni
+                    method = "POST"
+                    url = f"{API_BASE}/special-odds?_t={ts}"
+                    body = {"type": 0, "_cb": ts}
 
-                idx += 1
-                tasks.append(asyncio.create_task(bounded_worker(session, url, body)))
+                tasks.append(asyncio.create_task(bounded_worker(session, method, url, body)))
                 live.update(make_dashboard(metrics))
 
                 elapsed = time.perf_counter() - t_start
@@ -256,14 +275,14 @@ async def main():
                 if delay > 0:
                     await asyncio.sleep(delay)
 
-                if len(tasks) > 1000:
+                if len(tasks) > 800:
                     tasks = [t for t in tasks if not t.done()]
 
             if tasks:
                 await asyncio.gather(*tasks, return_exceptions=True)
 
     ticker_task.cancel()
-    console.print("\n[bold green][TAMAMLANDI] Load Test Bitti![/]")
+    console.print("\n[bold green][TAMAMLANDI] Gercek Kullanici Stres Testi Bitti![/]")
     console.print(f"Toplam Istek: {metrics.total_sent} | Basarili: [green]{metrics.ok}[/] | Hata: [red]{metrics.failed}[/]")
 
 
