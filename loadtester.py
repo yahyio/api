@@ -485,7 +485,11 @@ class App:
             return None
 
         method = self.method_var.get()
-        headers = {"Accept": "application/json"}
+        headers = {
+            "Accept": "application/json, text/plain, */*",
+            "Origin": "https://www.7xwon.com",
+            "Referer": "https://www.7xwon.com/"
+        }
         user_agent = self.ua_var.get().strip()
         if user_agent:
             headers["User-Agent"] = user_agent

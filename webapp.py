@@ -37,6 +37,14 @@ USER_AGENT = (
     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/156.0.0.0 Safari/537.36"
 )
 
+DEFAULT_HEADERS = {
+    "Accept": "application/json, text/plain, */*",
+    "Content-Type": "application/json",
+    "Origin": "https://www.7xwon.com",
+    "Referer": "https://www.7xwon.com/",
+    "User-Agent": USER_AGENT,
+}
+
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 32 * 1024
 
@@ -227,14 +235,12 @@ async def _async_worker(session, method, url, headers, body, timeout, sem, state
 
 
 async def _async_run_check(url, method, rps, duration, concurrency, timeout, token, body, state, scenarios, user_agent=None, cookie=None):
-    headers = {
-        "Accept": "application/json",
-        "User-Agent": (user_agent or "").strip() or USER_AGENT,
-        "Content-Type": "application/json"
-    }
+    headers = dict(DEFAULT_HEADERS)
+    if user_agent and user_agent.strip():
+        headers["User-Agent"] = user_agent.strip()
     if token:
         headers["Authorization"] = f"Bearer {token}"
-    if cookie:
+    if cookie and cookie.strip():
         headers["Cookie"] = cookie.strip()
 
     sc_main = scenarios.get("main", True)
