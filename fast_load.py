@@ -10,6 +10,31 @@ import argparse
 import sys
 import random
 
+try:
+    import undetected_chromedriver as uc
+except ImportError:
+    uc = None
+
+def get_fresh_cf_cookie():
+    if not uc:
+        return ""
+    try:
+        print("[*] Cloudflare kontrol ediliyor, taze oturum aliniyor...")
+        driver = uc.Chrome(headless=False)
+        driver.get("https://www.7xwon.com")
+        time.sleep(5)
+        cookies = driver.get_cookies()
+        driver.quit()
+        cf = [c for c in cookies if c["name"] == "cf_clearance"]
+        if cf:
+            cookie_str = "; ".join([f"{c['name']}={c['value']}" for c in cookies if c['name'] in ("cf_clearance", "device_id")])
+            print("[+] Taze Cloudflare oturumu basariyla alindi!")
+            return cookie_str
+    except Exception:
+        pass
+    return ""
+
+
 URL = "https://www.7xwon.com/api/main-events"
 HEADERS = {
     "Content-Type": "application/json",
@@ -148,11 +173,12 @@ async def main():
     async with aiohttp.ClientSession(connector=connector) as session:
         report_task = asyncio.create_task(reporter(stats))
         
+        cookie = args.cookie or get_fresh_cf_cookie()
         headers = dict(HEADERS)
         if args.user_agent:
             headers["User-Agent"] = args.user_agent
-        if args.cookie:
-            headers["Cookie"] = args.cookie
+        if cookie:
+            headers["Cookie"] = cookie
         if args.token:
             headers["Authorization"] = f"Bearer {args.token}"
 
