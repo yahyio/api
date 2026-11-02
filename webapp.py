@@ -31,7 +31,7 @@ except ImportError:
 MAX_RPS = 1000
 MAX_DURATION = 3600
 MAX_THREADS = 100
-DEFAULT_URL = "https://api.7xwon.com/main-events"
+DEFAULT_URL = "https://www.7xwon.com/api/main-events"
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/156.0.0.0 Safari/537.36"
@@ -151,9 +151,9 @@ def validate_config(data):
 
 
 async def fetch_live_event_ids(session, headers):
-    """Fetches currently active match event IDs from /main-events to simulate real browsing."""
+    """Fetches currently active match event IDs from /api/main-events to simulate real browsing."""
     try:
-        url = "https://api.7xwon.com/main-events"
+        url = "https://www.7xwon.com/api/main-events"
         payload = {"type": 0, "odds": 0, "code": False, "s": 1, "t": False}
         async with session.post(url, json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=6.0)) as resp:
             if resp.status == 200:
@@ -282,23 +282,23 @@ async def _async_run_check(url, method, rps, duration, concurrency, timeout, tok
             req_method = method
 
             if sc_main and sc_all_matches:
-                # Alternate between /main-events and random match /event
+                # Alternate between /api/main-events and random match /api/event
                 if index % 2 == 0:
-                    req_url = "https://api.7xwon.com/main-events"
+                    req_url = "https://www.7xwon.com/api/main-events"
                     req_method = "POST"
                     req_body = body or {"type": 0, "odds": 1, "code": False, "s": 1, "t": False}
                 else:
-                    req_url = "https://api.7xwon.com/event"
+                    req_url = "https://www.7xwon.com/api/event"
                     req_method = "POST"
-                    eid = random.choice(event_ids) if event_ids else 36223071
+                    eid = random.choice(event_ids) if event_ids else 36269546
                     req_body = {"id": eid}
             elif sc_all_matches:
-                req_url = "https://api.7xwon.com/event"
+                req_url = "https://www.7xwon.com/api/event"
                 req_method = "POST"
-                eid = random.choice(event_ids) if event_ids else 36223071
+                eid = random.choice(event_ids) if event_ids else 36269546
                 req_body = {"id": eid}
             elif sc_main:
-                req_url = "https://api.7xwon.com/main-events"
+                req_url = "https://www.7xwon.com/api/main-events"
                 req_method = "POST"
                 req_body = body or {"type": 0, "odds": 1, "code": False, "s": 1, "t": False}
 

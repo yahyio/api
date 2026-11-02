@@ -330,7 +330,7 @@ class App:
                       font=("Segoe UI", 9)).pack(anchor="w", padx=14, pady=(12, 2))
 
         field_label("URL")
-        self.url_var = tk.StringVar(value="https://api.7xwon.com/main-events")
+        self.url_var = tk.StringVar(value="https://www.7xwon.com/api/main-events")
         ttk.Entry(card, textvariable=self.url_var).pack(fill="x", **pad)
 
         row = ttk.Frame(card)

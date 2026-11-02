@@ -8,8 +8,9 @@ import aiohttp
 import time
 import argparse
 import sys
+import random
 
-URL = "https://api.7xwon.com/main-events"
+URL = "https://www.7xwon.com/api/main-events"
 HEADERS = {
     "Content-Type": "application/json",
     "Accept": "application/json",
@@ -34,7 +35,7 @@ class Stats:
 
 async def fetch_live_event_ids(session, headers):
     try:
-        url = "https://api.7xwon.com/main-events"
+        url = "https://www.7xwon.com/api/main-events"
         payload = {"type": 0, "odds": 0, "code": False, "s": 1, "t": False}
         async with session.post(url, json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=6.0)) as resp:
             if resp.status == 200:
@@ -170,17 +171,17 @@ async def main():
             
             if args.target == "both":
                 if index % 2 == 0:
-                    t_url = "https://api.7xwon.com/main-events"
+                    t_url = "https://www.7xwon.com/api/main-events"
                     t_payload = dict(PAYLOAD)
                     t_payload["odds"] = args.odds
                 else:
-                    t_url = "https://api.7xwon.com/event"
+                    t_url = "https://www.7xwon.com/api/event"
                     t_payload = {"id": random.choice(event_ids)}
             elif args.target == "event":
-                t_url = "https://api.7xwon.com/event"
+                t_url = "https://www.7xwon.com/api/event"
                 t_payload = {"id": random.choice(event_ids)}
             else:
-                t_url = "https://api.7xwon.com/main-events"
+                t_url = "https://www.7xwon.com/api/main-events"
                 t_payload = dict(PAYLOAD)
                 t_payload["odds"] = args.odds
                 
