@@ -13,7 +13,7 @@ URL = "https://api.7xwon.com/main-events"
 HEADERS = {
     "Content-Type": "application/json",
     "Accept": "application/json",
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/131.0 Safari/537.36"
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/156.0.0.0 Safari/537.36"
 }
 
 PAYLOAD = {
@@ -54,11 +54,7 @@ async def fetch_live_event_ids(session, headers):
         pass
     return [36223071, 36223072, 36223073, 36223074, 36223075]
 
-async def worker(session, target_url, payload, token, stats, timeout_sec, is_cascading=False):
-    headers = dict(HEADERS)
-    if token:
-        headers["Authorization"] = f"Bearer {token}"
-        
+async def worker(session, target_url, payload, headers, stats, timeout_sec, is_cascading=False):
     start_time = time.perf_counter()
     try:
         async with session.post(
@@ -82,7 +78,7 @@ async def worker(session, target_url, payload, token, stats, timeout_sec, is_cas
             stats.failed += 1
         # Cascading abort: spawn immediate retry
         if is_cascading:
-            asyncio.create_task(worker(session, target_url, payload, token, stats, timeout_sec, False))
+            asyncio.create_task(worker(session, target_url, payload, headers, stats, timeout_sec, False))
     except Exception:
         async with stats.lock:
             stats.failed += 1
@@ -125,6 +121,8 @@ async def main():
     parser.add_argument("--rps", type=int, default=50, help="Saniyede hedeflenen istek sayısı")
     parser.add_argument("--duration", type=int, default=60, help="Test süresi sn")
     parser.add_argument("--token", type=str, default="", help="Bearer token")
+    parser.add_argument("--cookie", type=str, default="", help="Cookie / cf_clearance")
+    parser.add_argument("--user-agent", type=str, default="", help="Custom User-Agent")
     parser.add_argument("--timeout", type=float, default=5.0, help="İstek zaman aşımı sn")
     parser.add_argument("--odds", type=int, default=1, help="odds parametresi (1 veya 0)")
     args = parser.parse_args()
@@ -148,6 +146,10 @@ async def main():
         report_task = asyncio.create_task(reporter(stats))
         
         headers = dict(HEADERS)
+        if args.user_agent:
+            headers["User-Agent"] = args.user_agent
+        if args.cookie:
+            headers["Cookie"] = args.cookie
         if args.token:
             headers["Authorization"] = f"Bearer {args.token}"
 
@@ -182,7 +184,7 @@ async def main():
                 t_payload = dict(PAYLOAD)
                 t_payload["odds"] = args.odds
                 
-            task = asyncio.create_task(worker(session, t_url, t_payload, args.token, stats, effective_timeout, args.cascading))
+            task = asyncio.create_task(worker(session, t_url, t_payload, headers, stats, effective_timeout, args.cascading))
             tasks.append(task)
             
             elapsed = time.perf_counter() - req_start

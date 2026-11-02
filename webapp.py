@@ -34,7 +34,7 @@ MAX_THREADS = 100
 DEFAULT_URL = "https://api.7xwon.com/main-events"
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-    "AppleWebKit/537.36 Chrome/131.0 Safari/537.36"
+    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/156.0.0.0 Safari/537.36"
 )
 
 app = Flask(__name__)
@@ -226,14 +226,16 @@ async def _async_worker(session, method, url, headers, body, timeout, sem, state
             state.record(*res)
 
 
-async def _async_run_check(url, method, rps, duration, concurrency, timeout, token, body, state, scenarios):
+async def _async_run_check(url, method, rps, duration, concurrency, timeout, token, body, state, scenarios, user_agent=None, cookie=None):
     headers = {
         "Accept": "application/json",
-        "User-Agent": USER_AGENT,
+        "User-Agent": (user_agent or "").strip() or USER_AGENT,
         "Content-Type": "application/json"
     }
     if token:
         headers["Authorization"] = f"Bearer {token}"
+    if cookie:
+        headers["Cookie"] = cookie.strip()
 
     sc_main = scenarios.get("main", True)
     sc_all_matches = scenarios.get("all_matches", False)
@@ -347,8 +349,8 @@ async def _async_run_check(url, method, rps, duration, concurrency, timeout, tok
     }
 
 
-def run_check(url, method, rps, duration, threads, timeout, token, body, state, scenarios):
-    return asyncio.run(_async_run_check(url, method, rps, duration, threads, timeout, token, body, state, scenarios))
+def run_check(url, method, rps, duration, threads, timeout, token, body, state, scenarios, user_agent=None, cookie=None):
+    return asyncio.run(_async_run_check(url, method, rps, duration, threads, timeout, token, body, state, scenarios, user_agent, cookie))
 
 
 @app.get("/")
@@ -386,7 +388,9 @@ def run():
     try:
         result = run_check(
             url, method, rps, duration, threads, timeout,
-            str(data.get("token", "")).strip(), body, state, scenarios
+            str(data.get("token", "")).strip(), body, state, scenarios,
+            user_agent=str(data.get("user_agent", "")).strip(),
+            cookie=str(data.get("cookie", "")).strip()
         )
     finally:
         with state.lock:

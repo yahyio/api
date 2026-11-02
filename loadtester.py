@@ -343,9 +343,13 @@ class App:
         ttk.Combobox(mcol, textvariable=self.method_var, width=8, state="readonly",
                      values=["GET", "POST", "PUT", "PATCH", "DELETE"]).pack()
 
-        field_label("User-Agent (opsiyonel)")
-        self.ua_var = tk.StringVar(value="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/131.0 Safari/537.36")
+        field_label("User-Agent (Cloudflare uyumlu)")
+        self.ua_var = tk.StringVar(value="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/156.0.0.0 Safari/537.36")
         ttk.Entry(card, textvariable=self.ua_var).pack(fill="x", **pad)
+
+        field_label("Cookie / cf_clearance (opsiyonel)")
+        self.cookie_var = tk.StringVar(value="")
+        ttk.Entry(card, textvariable=self.cookie_var).pack(fill="x", **pad)
 
         field_label("Bearer token (opsiyonel)")
         self.token_var = tk.StringVar(value="")
@@ -499,6 +503,9 @@ class App:
         token = self.token_var.get().strip()
         if token:
             headers["Authorization"] = f"Bearer {token}"
+        cookie = self.cookie_var.get().strip()
+        if cookie:
+            headers["Cookie"] = cookie
 
         return {"url": url, "method": method, "headers": headers, "body": body,
                 "rps": rps, "duration": duration, "threads": threads,

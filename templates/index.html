@@ -45,6 +45,16 @@
           <input id="token" name="token" type="password" placeholder="sadece bu testte">
         </div>
 
+        <div class="field full">
+          <label for="user_agent">User-Agent <small>Cloudflare icin tarayici ile birebir olmali</small></label>
+          <input id="user_agent" name="user_agent" value="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/156.0.0.0 Safari/537.36" spellcheck="false">
+        </div>
+
+        <div class="field full">
+          <label for="cookie">Cookie / cf_clearance <small>Opsiyonel (device_id=...; cf_clearance=...)</small></label>
+          <input id="cookie" name="cookie" placeholder="device_id=...; cf_clearance=..." spellcheck="false">
+        </div>
+
         <div class="grid4">
           <div class="field"><label for="rps">RPS <small>max 1000</small></label><input id="rps" name="rps" type="number" min="1" max="1000" value="100"></div>
           <div class="field"><label for="threads">Worker <small>max 100</small></label><input id="threads" name="threads" type="number" min="1" max="100" value="30"></div>
